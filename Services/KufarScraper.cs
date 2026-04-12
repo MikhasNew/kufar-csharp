@@ -9,30 +9,17 @@ public class KufarScraper
 {
     private readonly HttpClient _http;
     private readonly ILogger<KufarScraper> _logger;
+    private readonly MinskGeoService _geo;
     private readonly int _maxRetries = 3;
     private readonly int _retryDelayMs = 2000;
 
-    // Новый API endpoint Kufar
     private const string ApiBaseUrl = "https://api.kufar.by/search-api/v2/search/rendered-paginated";
 
-    private readonly Dictionary<string, string[]> _districtKeywords = new()
-    {
-        ["Фрунзенский"] = new[] { "фрунзенский" },
-        ["Московский"] = new[] { "московский" },
-        ["Октябрьский"] = new[] { "октябрьский" },
-        ["Советский"] = new[] { "советский" },
-        ["Центральный"] = new[] { "центральный" },
-        ["Первомайский"] = new[] { "первомайский" },
-        ["Ленинский"] = new[] { "ленинский" },
-        ["Партизанский"] = new[] { "партизанский" },
-        ["Заводской"] = new[] { "заводской" }
-    };
-
-    public KufarScraper(ILogger<KufarScraper>? logger = null)
+    public KufarScraper(ILogger<KufarScraper>? logger, MinskGeoService geo)
     {
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<KufarScraper>.Instance;
+        _geo = geo;
         
-        // Используем SocketsHttpHandler для более реалистичного TLS fingerprint
         var handler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
@@ -44,9 +31,6 @@ public class KufarScraper
         _http.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
         _http.DefaultRequestHeaders.Add("Accept", "*/*");
         _http.DefaultRequestHeaders.Add("Accept-Language", "en-US,en;q=0.9,ru-RU;q=0.8,ru;q=0.7");
-        _http.DefaultRequestHeaders.Add("sec-ch-ua", "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"");
-        _http.DefaultRequestHeaders.Add("sec-ch-ua-mobile", "?0");
-        _http.DefaultRequestHeaders.Add("sec-ch-ua-platform", "\"Windows\"");
         _http.Timeout = TimeSpan.FromSeconds(30);
     }
 
@@ -54,7 +38,7 @@ public class KufarScraper
     {
         var listings = new List<Listing>();
 
-        _logger.LogInformation("Начат скрапинг Kufar (новый API), страниц: {MaxPages}", maxPages);
+        _logger.LogInformation("Начат скрапинг Kufar, страниц: {MaxPages}", maxPages);
         
         string? currentCursor = null;
 
@@ -70,16 +54,6 @@ public class KufarScraper
                 {
                     var resp = await _http.GetAsync(url);
                     var content = await resp.Content.ReadAsStringAsync();
-                    
-                    if (!resp.IsSuccessStatusCode)
-                    {
-                        _logger.LogError("HTTP {StatusCode}: {Content}", resp.StatusCode, content.Substring(0, Math.Min(500, content.Length)));
-                    }
-                    else
-                    {
-                        _logger.LogDebug("HTTP OK, размер ответа: {Length} байт, первых 200 символов: {Preview}", content.Length, content.Substring(0, Math.Min(200, content.Length)));
-                    }
-                    
                     return content;
                 });
 
@@ -91,34 +65,28 @@ public class KufarScraper
 
                 var data = JsonDocument.Parse(responseMsg);
 
+                // Логируем общее количество найденных объявлений
+                if (data.RootElement.TryGetProperty("total", out var total))
+                {
+                    _logger.LogInformation("Всего найдено объявлений на Kufar: {Total}", total);
+                }
+
                 if (!data.RootElement.TryGetProperty("ads", out var ads))
                 {
                     _logger.LogWarning("Отсутствует поле 'ads' в ответе API на странице {Page}", page);
                     break;
                 }
 
-                int pageListingsCount = 0;
+                int pageSavedCount = 0;
                 foreach (var ad in ads.EnumerateArray())
                 {
                     try
                     {
                         var listing = ParseListing(ad);
-                        if (listing != null)
+                        if (listing != null && listing.PriceUsd >= 1000 && listing.Area >= 5)
                         {
-                            _logger.LogDebug("Объявление: {Title}, Цена: ${Price}, Площадь: {Area}", 
-                                listing.Title, listing.PriceUsd, listing.Area);
-                            
-                            // Фильтр: цена от $1,000 и площадь от 5 м²
-                            if (listing.PriceUsd >= 1000 && listing.Area >= 5)
-                            {
-                                listings.Add(listing);
-                                pageListingsCount++;
-                            }
-                            else
-                            {
-                                _logger.LogDebug("Отфильтровано: цена ${Price} или площадь {Area}", 
-                                    listing.PriceUsd, listing.Area);
-                            }
+                            listings.Add(listing);
+                            pageSavedCount++;
                         }
                     }
                     catch (Exception ex)
@@ -127,14 +95,8 @@ public class KufarScraper
                     }
                 }
 
-                _logger.LogDebug("Страница {Page}: получено {Count} объявлений", page, pageListingsCount);
-
-                // Если объявлений меньше чем size — значит это последняя страница
-                if (pageListingsCount < 50)
-                {
-                    _logger.LogInformation("Достигнута последняя страница ({Count} < 50)", pageListingsCount);
-                    break;
-                }
+                _logger.LogInformation("Страница {Page}: сохранено {Count} объявлений из {TotalOnPage}", 
+                    page, pageSavedCount, ads.GetArrayLength());
 
                 // Получаем токен для следующей страницы
                 currentCursor = null;
@@ -145,7 +107,7 @@ public class KufarScraper
                     {
                         if (pElem.TryGetProperty("label", out var labelProp) && labelProp.GetString() == "next")
                         {
-                            if (pElem.TryGetProperty("token", out var tokenProp) && tokenProp.ValueKind == JsonValueKind.String)
+                            if (pElem.TryGetProperty("token", out var tokenProp))
                             {
                                 currentCursor = tokenProp.GetString();
                                 break;
@@ -156,7 +118,7 @@ public class KufarScraper
 
                 if (string.IsNullOrEmpty(currentCursor))
                 {
-                    _logger.LogInformation("Токен следующей страницы не найден. Завершаем скрапинг.");
+                    _logger.LogInformation("Достигнута последняя страница. Завершаем скрапинг.");
                     break;
                 }
             }
@@ -166,10 +128,9 @@ public class KufarScraper
                 break;
             }
 
-            // Задержка между страницами для предотвращения блокировки
             if (page < maxPages)
             {
-                await Task.Delay(3000);
+                await Task.Delay(2000);
             }
         }
 
@@ -387,7 +348,7 @@ public class KufarScraper
                 Latitude = lat,
                 Longitude = lon,
                 ImageUrl = string.IsNullOrEmpty(imageUrl) ? null : imageUrl,
-                District = ExtractDistrict(location),
+                District = ExtractDistrict(location, title, description),
                 FlatType = GetFlatType(title, description),
                 Location = location,
                 Url = url,
@@ -403,12 +364,20 @@ public class KufarScraper
         }
     }
 
-    private string ExtractDistrict(string location)
+    private string ExtractDistrict(string location, string title, string description)
     {
-        var l = location.ToLower();
-        foreach (var (district, keywords) in _districtKeywords)
-            if (keywords.Any(k => l.Contains(k)))
-                return district;
+        // Сначала проверяем адрес
+        var d = _geo.GetDistrictByAddress(location);
+        if (!string.IsNullOrEmpty(d) && d != "Unknown") return d;
+
+        // Затем заголовок
+        d = _geo.GetDistrictByAddress(title);
+        if (!string.IsNullOrEmpty(d) && d != "Unknown") return d;
+
+        // В конце описание (может быть длинным, но там часто указан микрорайон)
+        d = _geo.GetDistrictByAddress(description);
+        if (!string.IsNullOrEmpty(d) && d != "Unknown") return d;
+
         return "Unknown";
     }
 
