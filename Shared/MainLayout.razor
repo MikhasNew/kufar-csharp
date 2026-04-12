@@ -2,120 +2,179 @@
 
 <PageTitle>Минск Недвижимость</PageTitle>
 
-<div class="page">
-    <div class="sidebar">
-        <div class="top-row px-4">
-            <h4><i class="bi bi-house-door"></i> Минск Недвижимость</h4>
+<div class="app-container">
+    <header class="app-header">
+        <div class="header-content">
+            <div class="logo">
+                <i class="bi bi-house-door-fill"></i>
+                <span>Минск Недвижимость</span>
+            </div>
+            
+            <nav class="nav-tabs">
+                <NavLink class="nav-tab" href="" Match="NavLinkMatch.All">
+                    <i class="bi bi-speedometer2"></i> Обзор
+                </NavLink>
+                <NavLink class="nav-tab" href="listings">
+                    <i class="bi bi-list-ul"></i> Объявления
+                </NavLink>
+                <NavLink class="nav-tab" href="investment">
+                    <i class="bi bi-graph-up-arrow"></i> Инвестиции
+                </NavLink>
+                <NavLink class="nav-tab" href="interesting">
+                    <i class="bi bi-star-fill"></i> Избранное
+                </NavLink>
+                <NavLink class="nav-tab" href="stats">
+                    <i class="bi bi-bar-chart-fill"></i> Статистика
+                </NavLink>
+            </nav>
         </div>
+    </header>
 
-        <nav class="nav-menu">
-            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">Обзор</NavLink>
-            <NavLink class="nav-link" href="listings">Объявления</NavLink>
-            <NavLink class="nav-link" href="investment">💰 Инвестиции</NavLink>
-            <NavLink class="nav-link" href="interesting">Избранное</NavLink>
-            <NavLink class="nav-link" href="stats">Статистика</NavLink>
-        </nav>
-    </div>
-
-    <main>
-        <div class="top-row px-4">
-            <span class="text-muted">Мониторинг рынка недвижимости Минска</span>
-        </div>
-
-        <article class="content px-4">
+    <main class="app-main">
+        <div class="content-wrapper">
             @Body
-        </article>
+        </div>
     </main>
 </div>
 
 <style>
+:root {
+    --primary: #3498db;
+    --primary-dark: #2980b9;
+    --bg-light: #f8fafc;
+    --text-main: #1e293b;
+    --text-muted: #64748b;
+    --glass-bg: rgba(255, 255, 255, 0.8);
+    --glass-border: rgba(255, 255, 255, 0.3);
+}
+
 body {
-    background: #f5f7fa;
+    background-color: var(--bg-light);
+    color: var(--text-main);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
 }
 
-.sidebar {
-    background: #2c3e50;
-    min-height: 100vh;
-    padding: 20px;
-    color: white;
-}
-
-.sidebar h4 {
-    color: white;
-    margin-bottom: 20px;
-}
-
-.nav-menu {
+.app-container {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    min-height: 100vh;
 }
 
-.nav-link {
-    color: #bdc3c7;
+.app-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 70px;
+    background: var(--glass-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--glass-border);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05);
+}
+
+.header-content {
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 24px;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: var(--text-main);
+}
+
+.logo i {
+    color: var(--primary);
+    font-size: 1.5rem;
+}
+
+.nav-tabs {
+    display: flex;
+    gap: 8px;
+}
+
+.nav-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    color: var(--text-muted);
     text-decoration: none;
-    display: block;
-    padding: 10px;
-    border-radius: 5px;
-    transition: all 0.2s;
+    font-weight: 500;
+    font-size: 0.95rem;
+    transition: all 0.2s ease;
 }
 
-.nav-link:hover, .nav-link.active {
-    background: #34495e;
-    color: white;
+.nav-tab i {
+    font-size: 1.1rem;
 }
 
-.stat-card {
+.nav-tab:hover {
+    background: rgba(0, 0, 0, 0.04);
+    color: var(--text-main);
+}
+
+.nav-tab.active {
+    background: rgba(52, 152, 219, 0.1);
+    color: var(--primary);
+}
+
+.app-main {
+    margin-top: 70px;
+    padding: 32px 0;
+}
+
+.content-wrapper {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+/* Переопределение стилей карт из старого шаблона для консистентности */
+.stat-card, .listing-card, .chart-container {
     background: white;
-    border-radius: 10px;
-    padding: 20px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-}
-
-.listing-card {
-    background: white;
-    border-radius: 10px;
-    padding: 15px;
-    margin-bottom: 15px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    transition: transform 0.2s;
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    border: 1px solid #f1f5f9;
+    margin-bottom: 24px;
 }
 
 .listing-card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-4px);
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
 }
 
 .price-tag {
-    font-size: 1.5rem;
-    font-weight: bold;
-    color: #27ae60;
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: #059669;
 }
 
-.badge-type {
-    background: #3498db;
+.badge {
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
 }
 
-.badge-district {
-    background: #9b59b6;
-}
+.badge-type { background: #e0f2fe; color: #0369a1; }
+.badge-district { background: #f3e8ff; color: #7e22ce; }
 
-.interesting-btn {
-    color: #ccc;
-    transition: color 0.2s;
-}
-
-.interesting-btn.active {
-    color: #f39c12;
-}
-
-.chart-container {
-    background: white;
-    border-radius: 10px;
-    padding: 20px;
-    margin-bottom: 20px;
-}
-
-.content {
-    padding: 20px;
-}
 </style>

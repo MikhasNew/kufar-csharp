@@ -71,7 +71,6 @@ public class ListingService
                         _ctx.PriceHistories.Add(new PriceHistory
                         {
                             ListingId = listing.Id,
-                            PriceUsd = listing.PriceUsd,
                             PricePerSqm = listing.PricePerSqm,
                             RecordedAt = now
                         });
@@ -84,7 +83,7 @@ public class ListingService
         return saved;
     }
 
-    public async Task<List<Listing>> GetListingsAsync(ListingFilter? filter = null)
+    public async Task<PagedResult<Listing>> GetListingsAsync(ListingFilter? filter = null)
     {
         var query = _ctx.Listings.AsQueryable();
 
@@ -102,13 +101,25 @@ public class ListingService
                 query = query.Where(l => l.PriceUsd <= filter.MaxPrice);
             if (filter.InterestingOnly)
                 query = query.Where(l => l.IsInteresting);
-            if (filter.Districts?.Count > 0)
-                query = query.Where(l => filter.Districts.Contains(l.District));
-            if (filter.FlatTypes?.Count > 0)
-                query = query.Where(l => filter.FlatTypes.Contains(l.FlatType));
         }
 
-        return await query.OrderByDescending(l => l.ScrapedAt).Take(500).ToListAsync();
+        var totalCount = await query.CountAsync();
+        var pageSize = filter?.PageSize ?? 20;
+        var page = filter?.Page ?? 1;
+
+        var items = await query
+            .OrderByDescending(l => l.ScrapedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        return new PagedResult<Listing>
+        {
+            Items = items,
+            TotalCount = totalCount,
+            Page = page,
+            PageSize = pageSize
+        };
     }
 
     public async Task<MarketStats> GetStatsAsync()
@@ -161,6 +172,15 @@ public class ListingService
         await _ctx.Listings.Select(l => l.FlatType).Distinct().OrderBy(t => t).ToListAsync();
 }
 
+public class PagedResult<T>
+{
+    public List<T> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+}
+
 public class ListingFilter
 {
     public string? District { get; set; }
@@ -169,6 +189,6 @@ public class ListingFilter
     public int MinPrice { get; set; }
     public int MaxPrice { get; set; }
     public bool InterestingOnly { get; set; }
-    public List<string>? Districts { get; set; }
-    public List<string>? FlatTypes { get; set; }
+    public int Page { get; set; } = 1;
+    public int PageSize { get; set; } = 20;
 }

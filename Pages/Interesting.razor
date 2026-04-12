@@ -35,6 +35,7 @@
 
     protected override async Task OnInitializedAsync()
     {
-        listings = await ListingService.GetListingsAsync(new ListingFilter { InterestingOnly = true });
+        var result = await ListingService.GetListingsAsync(new ListingFilter { InterestingOnly = true, PageSize = 1000 });
+        listings = result.Items;
     }
 }

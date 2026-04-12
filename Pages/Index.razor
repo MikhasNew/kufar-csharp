@@ -125,8 +125,8 @@
     private async Task LoadData()
     {
         stats = await ListingService.GetStatsAsync();
-        recentListings = await ListingService.GetListingsAsync();
-        recentListings = recentListings.Take(6).ToList();
+        var result = await ListingService.GetListingsAsync(new ListingFilter { PageSize = 6 });
+        recentListings = result.Items;
     }
 
     private async Task RefreshData()
