@@ -10,11 +10,15 @@ public class ListingService
 
     public ListingService(AppDbContext ctx) => _ctx = ctx;
 
-    public async Task<int> SaveListingsAsync(List<Listing> listings)
+    /// <summary>
+    /// Сохраняет список объявлений в БД. Возвращает tuple: (новые, обновлённые, все затронутые listing-и).
+    /// </summary>
+    public async Task<(int NewCount, int UpdatedCount, List<Listing> SavedListings)> SaveListingsAsync(List<Listing> listings)
     {
         int saved = 0;
         int updated = 0;
         var now = DateTime.UtcNow.ToString("o");
+        var savedListings = new List<Listing>();
 
         foreach (var item in listings)
         {
@@ -23,19 +27,21 @@ public class ListingService
             {
                 // Новое объявление
                 _ctx.Listings.Add(item);
+                savedListings.Add(item); // EF Core сгенерирует Id при SaveChanges
                 saved++;
             }
             else
             {
                 // Существующее объявление - обновляем данные
                 existing.ScrapedAt = item.ScrapedAt;
-                
+
                 // Проверяем, изменилась ли цена
                 if (existing.PriceUsd != item.PriceUsd)
                 {
                     existing.PriceUsd = item.PriceUsd;
                     existing.PricePerSqm = item.PricePerSqm;
-                    
+                    savedListings.Add(existing);
+
                     // Добавляем запись в историю цен
                     _ctx.PriceHistories.Add(new PriceHistory
                     {
@@ -52,7 +58,7 @@ public class ListingService
         if (saved > 0 || updated > 0)
         {
             await _ctx.SaveChangesAsync();
-            
+
             // Если были добавлены новые объявления, нам нужно получить их сгенерированные ID
             // для добавления первой записи в историю цен.
             if (saved > 0)
@@ -80,7 +86,7 @@ public class ListingService
             }
         }
 
-        return saved;
+        return (saved, updated, savedListings);
     }
 
     public async Task<PagedResult<Listing>> GetListingsAsync(ListingFilter? filter = null)

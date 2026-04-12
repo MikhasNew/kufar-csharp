@@ -135,9 +135,17 @@
         statusMessage = "";
         try
         {
-            var listings = await Scraper.ScrapeAsync(maxPages);
-            var saved = await ListingService.SaveListingsAsync(listings);
-            statusMessage = $"Получено {listings.Count}, сохранено {saved}";
+            int totalReceived = 0;
+            int totalSaved = 0;
+
+            await foreach (var pageListings in Scraper.ScrapeEnumerableAsync(maxPages))
+            {
+                totalReceived += pageListings.Count;
+                var (newCount, updatedCount, savedListings) = await ListingService.SaveListingsAsync(pageListings);
+                totalSaved += newCount;
+            }
+
+            statusMessage = $"Получено {totalReceived}, сохранено {totalSaved}";
             await LoadData();
         }
         catch (Exception ex)

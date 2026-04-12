@@ -15,6 +15,7 @@ public interface IInvestmentAnalyzer
     Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15);
     Task<ComparativeAnalysis> CompareDistrictsAsync();
     Task RecalculateAllScoresAsync();
+    Task UpsertScoresAsync(IEnumerable<Listing> listings);
 }
 
 public class InvestmentAnalyzer : IInvestmentAnalyzer
@@ -392,6 +393,62 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         await _ctx.SaveChangesAsync();
 
         _logger.LogInformation("Пересчитано {Count} инвестиционных скорингов", scores.Count);
+    }
+
+    /// <summary>
+    /// Рассчитать и сохранить/обновить скоринги только для переданных объявлений.
+    /// Не удаляет остальные скоринги — идеален для потоковой обработки.
+    /// </summary>
+    public async Task UpsertScoresAsync(IEnumerable<Listing> listings)
+    {
+        var listingList = listings.ToList();
+        if (!listingList.Any()) return;
+
+        var listingIds = listingList.Select(l => l.Id).ToHashSet();
+        var scores = new List<InvestmentScore>();
+        int successCount = 0;
+        int errorCount = 0;
+
+        foreach (var listing in listingList)
+        {
+            try
+            {
+                // Если у listing ещё нет Id (только добавлен), EF Core заполнит его после SaveChanges
+                // Поэтому нужно убедиться, что Id проставлен
+                if (listing.Id == 0)
+                {
+                    // Listing ещё не сохранён — это ошибка, пропускаем
+                    _logger.LogWarning("Listing с ExternalId={ExternalId} не имеет Id, пропускаем скоринг", listing.ExternalId);
+                    errorCount++;
+                    continue;
+                }
+
+                var score = await CalculateScoreAsync(listing);
+                scores.Add(score);
+                successCount++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Ошибка расчета скоринга для listing {ListingId}", listing.Id);
+                errorCount++;
+            }
+        }
+
+        if (scores.Any())
+        {
+            // Удаляем старые скоринги только для этих listing-ов
+            var existingScores = await _ctx.InvestmentScores
+                .Where(s => listingIds.Contains(s.ListingId))
+                .ToListAsync();
+            _ctx.InvestmentScores.RemoveRange(existingScores);
+
+            // Добавляем новые
+            await _ctx.InvestmentScores.AddRangeAsync(scores);
+            await _ctx.SaveChangesAsync();
+        }
+
+        _logger.LogInformation("UpsertScores: успешно={Success}, ошибок={Errors}, сохранено скорингов={Saved}",
+            successCount, errorCount, scores.Count);
     }
 
     // ==================== PRIVATE HELPER METHODS ====================

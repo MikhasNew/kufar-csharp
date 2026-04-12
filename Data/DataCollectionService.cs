@@ -74,23 +74,39 @@ public class DataCollectionService : BackgroundService
             var maxPages = _configuration.GetValue<int>("DataCollection:MaxPagesPerRun", 5);
             _logger.LogInformation("Глубина парсинга: {MaxPages} страниц", maxPages);
 
-            // Скрапинг данных
-            var listings = await scraper.ScrapeAsync(maxPages);
-            _logger.LogInformation("Получено {Count} объявлений из Kufar", listings.Count);
+            // Потоковый скрапинг данных — каждая страница обрабатывается сразу
+            int totalReceived = 0;
+            int totalSaved = 0;
+            int totalUpdated = 0;
+            bool hasNewListings = false;
 
-            // Сохранение в БД
-            var saved = await listingService.SaveListingsAsync(listings);
-            _logger.LogInformation("Сохранено {Count} новых объявлений", saved);
+            await foreach (var pageListings in scraper.ScrapeEnumerableAsync(maxPages))
+            {
+                totalReceived += pageListings.Count;
+                _logger.LogDebug("Обработка страницы: {Count} объявлений", pageListings.Count);
 
-            TotalListingsCollected += saved;
+                var (newCount, updatedCount, savedListings) = await listingService.SaveListingsAsync(pageListings);
+                totalSaved += newCount;
+                totalUpdated += updatedCount;
+
+                if (newCount > 0) hasNewListings = true;
+
+                // Рассчитываем скоринги только для сохранённых объявлений этой страницы
+                if (savedListings.Count > 0)
+                {
+                    await investmentAnalyzer.UpsertScoresAsync(savedListings);
+                }
+            }
+
+            _logger.LogInformation("Потоковый сбор завершен: получено={Received}, новых={New}, обновлено={Updated}",
+                totalReceived, totalSaved, totalUpdated);
+
+            TotalListingsCollected += totalSaved;
 
             // Автоматический пересчет инвестиционных скорингов если есть новые объявления
-            if (saved > 0)
+            if (hasNewListings)
             {
-                _logger.LogInformation("Пересчет инвестиционных скорингов...");
-                await investmentAnalyzer.RecalculateAllScoresAsync();
-
-                // Проверка алертов
+                _logger.LogInformation("Проверка алертов...");
                 await CheckAlertsAsync(scope.ServiceProvider);
             }
 

@@ -36,15 +36,31 @@ public class KufarScraper
 
     public async Task<List<Listing>> ScrapeAsync(int maxPages = 2)
     {
-        var listings = new List<Listing>();
+        var allListings = new List<Listing>();
+        await foreach (var pageListings in ScrapeEnumerableAsync(maxPages))
+        {
+            allListings.AddRange(pageListings);
+        }
+        return allListings;
+    }
 
-        _logger.LogInformation("Начат скрапинг Kufar, страниц: {MaxPages}", maxPages);
-        
+    /// <summary>
+    /// Потоковая обработка страниц — возвращает IAsyncEnumerable, где каждый элемент
+    /// это список объявлений с одной загруженной страницы. Позволяет обрабатывать
+    /// данные по мере поступления, не дожидаясь загрузки всех страниц.
+    /// </summary>
+    public async IAsyncEnumerable<List<Listing>> ScrapeEnumerableAsync(int maxPages = 2)
+    {
+        _logger.LogInformation("Начат потоковый скрапинг Kufar, макс. страниц: {MaxPages}", maxPages);
+
         string? currentCursor = null;
+        int totalPagesLoaded = 0;
 
         for (int page = 1; page <= maxPages; page++)
         {
             var url = BuildApiUrl(currentCursor);
+            List<Listing>? pageListings = null;
+            bool shouldBreak = false;
 
             try
             {
@@ -60,72 +76,92 @@ public class KufarScraper
                 if (string.IsNullOrEmpty(responseMsg))
                 {
                     _logger.LogWarning("Пустой ответ на странице {Page}", page);
-                    break;
+                    shouldBreak = true;
                 }
-
-                var data = JsonDocument.Parse(responseMsg);
-
-                // Логируем общее количество найденных объявлений
-                if (data.RootElement.TryGetProperty("total", out var total))
+                else
                 {
-                    _logger.LogInformation("Всего найдено объявлений на Kufar: {Total}", total);
-                }
+                    var data = JsonDocument.Parse(responseMsg);
 
-                if (!data.RootElement.TryGetProperty("ads", out var ads))
-                {
-                    _logger.LogWarning("Отсутствует поле 'ads' в ответе API на странице {Page}", page);
-                    break;
-                }
-
-                int pageSavedCount = 0;
-                foreach (var ad in ads.EnumerateArray())
-                {
-                    try
+                    if (data.RootElement.TryGetProperty("total", out var total))
                     {
-                        var listing = ParseListing(ad);
-                        if (listing != null && listing.PriceUsd >= 1000 && listing.Area >= 5)
-                        {
-                            listings.Add(listing);
-                            pageSavedCount++;
-                        }
+                        _logger.LogInformation("Всего найдено объявлений на Kufar: {Total}", total);
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Ошибка парсинга объявления на странице {Page}", page);
-                    }
-                }
 
-                _logger.LogInformation("Страница {Page}: сохранено {Count} объявлений из {TotalOnPage}", 
-                    page, pageSavedCount, ads.GetArrayLength());
-
-                // Получаем токен для следующей страницы
-                currentCursor = null;
-                if (data.RootElement.TryGetProperty("pagination", out var pagination) &&
-                    pagination.TryGetProperty("pages", out var pagesArray))
-                {
-                    foreach (var pElem in pagesArray.EnumerateArray())
+                    if (data.RootElement.TryGetProperty("ads", out var ads))
                     {
-                        if (pElem.TryGetProperty("label", out var labelProp) && labelProp.GetString() == "next")
+                        pageListings = new List<Listing>();
+                        foreach (var ad in ads.EnumerateArray())
                         {
-                            if (pElem.TryGetProperty("token", out var tokenProp))
+                            try
                             {
-                                currentCursor = tokenProp.GetString();
-                                break;
+                                var listing = ParseListing(ad);
+                                if (listing != null && listing.PriceUsd >= 1000 && listing.Area >= 5)
+                                {
+                                    pageListings.Add(listing);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Ошибка парсинга объявления на странице {Page}", page);
                             }
                         }
-                    }
-                }
 
-                if (string.IsNullOrEmpty(currentCursor))
-                {
-                    _logger.LogInformation("Достигнута последняя страница. Завершаем скрапинг.");
-                    break;
+                        totalPagesLoaded++;
+                        _logger.LogInformation("Страница {Page}: получено {Count} объявлений из {TotalOnPage}",
+                            page, pageListings.Count, ads.GetArrayLength());
+
+                        // Если объявлений меньше чем size — последняя страница
+                        if (pageListings.Count < 50)
+                        {
+                            _logger.LogInformation("Достигнута последняя страница ({Count} < 50)", pageListings.Count);
+                            shouldBreak = true;
+                        }
+
+                        // Получаем токен для следующей страницы
+                        if (!shouldBreak && data.RootElement.TryGetProperty("pagination", out var pagination) &&
+                            pagination.TryGetProperty("pages", out var pagesArray))
+                        {
+                            foreach (var pElem in pagesArray.EnumerateArray())
+                            {
+                                if (pElem.TryGetProperty("label", out var labelProp) && labelProp.GetString() == "next")
+                                {
+                                    if (pElem.TryGetProperty("token", out var tokenProp))
+                                    {
+                                        currentCursor = tokenProp.GetString();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (string.IsNullOrEmpty(currentCursor))
+                        {
+                            _logger.LogInformation("Токен следующей страницы не найден. Завершаем скрапинг.");
+                            shouldBreak = true;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Отсутствует поле 'ads' в ответе API на странице {Page}", page);
+                        shouldBreak = true;
+                    }
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Ошибка при запросе страницы {Page}: {Message}", page, ex.Message);
-                break;
+                shouldBreak = true;
+            }
+
+            // Yield вне try-catch
+            if (pageListings != null)
+            {
+                yield return pageListings;
+            }
+
+            if (shouldBreak)
+            {
+                yield break;
             }
 
             if (page < maxPages)
@@ -134,8 +170,7 @@ public class KufarScraper
             }
         }
 
-        _logger.LogInformation("Скрапинг завершен, всего получено {Count} объявлений", listings.Count);
-        return listings;
+        _logger.LogInformation("Потоковый скрапинг завершен, загружено страниц: {Pages}", totalPagesLoaded);
     }
 
     /// <summary>
