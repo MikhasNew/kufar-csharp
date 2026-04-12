@@ -22,6 +22,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     private readonly AppDbContext _ctx;
     private readonly ILogger<InvestmentAnalyzer> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly MinskGeoService _minskGeo;
 
     // Веса для формулы скоринга
     private const double PriceWeight = 0.35;
@@ -56,11 +57,12 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         {"Фрунзенский район", "Фрунзенский"}, {"Фрунзенскі раён", "Фрунзенский"}
     };
 
-    public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory)
+    public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory, MinskGeoService minskGeo)
     {
         _ctx = ctx;
         _logger = logger;
         _httpClientFactory = httpClientFactory;
+        _minskGeo = minskGeo;
     }
 
     /// <summary>
@@ -710,11 +712,19 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     // ==================== GEO HELPER METHODS ====================
 
     /// <summary>
-    /// Определение района (Hybrid: DB Nearest 1km -> OSM API)
+    /// Определение района (Hybrid: Local Polygon -> DB Nearest 1km -> OSM API)
     /// </summary>
     private async Task<(string District, bool AutoDetected)> DetectDistrictAsync(double lat, double lon)
     {
-        // 1. Поиск в БД в радиусе 1 км
+        // 1. Локальный геокодер (мгновенно, без HTTP)
+        var localDistrict = _minskGeo.GetDistrictByCoords(lat, lon);
+        if (localDistrict != null)
+        {
+            _logger.LogDebug("Район определён локально: {District}", localDistrict);
+            return (localDistrict, true);
+        }
+
+        // 2. Поиск в БД в радиусе 1 км (фоллбэк для пригородов)
         var latDiff = 1.0 / 111.0;
         var lonDiff = 1.0 / (111.0 * Math.Cos(ToRadians(lat)));
         var candidates = await _ctx.Listings
@@ -735,7 +745,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             return (nearest.District, true);
         }
 
-        // 2. OSM Nominatim API Fallback (Reverse Geocoding)
+        // 3. OSM Nominatim API Fallback (последний resort)
         try
         {
             var client = _httpClientFactory.CreateClient("Nominatim");
@@ -747,7 +757,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             {
                 var rawDistrict = districtNode.ToString().Trim();
                 if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
-                
+
                 var cleaned = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
                 return (cleaned, true);
             }
@@ -761,28 +771,37 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     }
 
     /// <summary>
-    /// Определение района по адресу (Geocoding)
+    /// Определение района по адресу (Hybrid: Local Microdistrict Registry -> OSM Geocoding)
     /// </summary>
     private async Task<(string District, bool IsAuto)> DetectDistrictByAddressAsync(string address)
     {
+        // 1. Локальный поиск по микрорайонам (мгновенно, без HTTP)
+        var localDistrict = _minskGeo.GetDistrictByAddress(address);
+        if (localDistrict != null)
+        {
+            _logger.LogDebug("Район определён по микрорайону: {District}", localDistrict);
+            return (localDistrict, true);
+        }
+
+        // 2. OSM Nominatim API Fallback
         try
         {
             var client = _httpClientFactory.CreateClient("Nominatim");
             // Добавляем "Минск" к запросу для точности
             var query = Uri.EscapeDataString($"{address}, Минск");
             var url = $"https://nominatim.openstreetmap.org/search?q={query}&format=json&addressdetails=1&limit=1&accept-language=ru";
-            
+
             var results = await client.GetFromJsonAsync<System.Text.Json.Nodes.JsonArray>(url);
             if (results != null && results.Count > 0)
             {
                 var addressNode = results[0]?["address"];
                 var districtNode = addressNode?["city_district"] ?? addressNode?["suburb"];
-                
+
                 if (districtNode != null)
                 {
                     var rawDistrict = districtNode.ToString().Trim();
                     if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
-                    
+
                     var cleaned = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
                     return (cleaned, true);
                 }

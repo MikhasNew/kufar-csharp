@@ -13,6 +13,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddScoped<ListingService>();
 builder.Services.AddScoped<IInvestmentAnalyzer, InvestmentAnalyzer>();
 builder.Services.AddScoped<DataSeeder>();
+builder.Services.AddSingleton<MinskGeoService>();
 
 // Фоновый сервис для автоматического сбора данных
 builder.Services.AddHostedService<DataCollectionService>();
@@ -109,6 +110,54 @@ app.MapGet("/api/test/enrichment", async (AppDbContext db) =>
         .ToListAsync();
 
     return Results.Ok(new { total, autoDetected, unknown, withCoords, samples });
+});
+
+// Временный endpoint для тестирования локального геокодера
+app.MapGet("/api/test/geocoder", (MinskGeoService geo) =>
+{
+    var coordTests = new[]
+    {
+        new { Lat = 53.9045, Lon = 27.5615, Expected = "Центральный" },
+        new { Lat = 53.9100, Lon = 27.4500, Expected = "Фрунзенский" },
+        new { Lat = 53.9350, Lon = 27.6300, Expected = "Советский" },
+        new { Lat = 53.8900, Lon = 27.5500, Expected = "Ленинский" },
+        new { Lat = 53.9450, Lon = 27.6700, Expected = "Первомайский" },
+        new { Lat = 53.8750, Lon = 27.5700, Expected = "Ленинский" },   // Курасовщина (юг)
+        new { Lat = 53.9050, Lon = 27.4800, Expected = "Московский" },
+        new { Lat = 53.8950, Lon = 27.6400, Expected = "Партизанский" },
+        new { Lat = 53.8800, Lon = 27.6500, Expected = "Заводской" },
+    };
+
+    var results = coordTests.Select(t => new
+    {
+        t.Lat, t.Lon, t.Expected,
+        Actual = geo.GetDistrictByCoords(t.Lat, t.Lon),
+        Pass = geo.GetDistrictByCoords(t.Lat, t.Lon) == t.Expected
+    }).ToList();
+
+    var addrTests = new[]
+    {
+        new { Address = "Малиновка, ул. Якубовского 45", Expected = "Фрунзенский" },
+        new { Address = "Уручье, пр. Независимости 120", Expected = "Первомайский" },
+        new { Address = "Чижовка, ул. Чижовская 10", Expected = "Ленинский" },
+        new { Address = "Зелёный Луг, ул. Сосновая 5", Expected = "Советский" },
+    };
+
+    var addrResults = addrTests.Select(t => new
+    {
+        t.Address, t.Expected,
+        Actual = geo.GetDistrictByAddress(t.Address),
+        Pass = geo.GetDistrictByAddress(t.Address) == t.Expected
+    }).ToList();
+
+    var totalPassed = results.Count(r => r.Pass) + addrResults.Count(r => r.Pass);
+    var totalTests = results.Count + addrResults.Count;
+
+    return Results.Ok(new {
+        coordinateTests = results,
+        addressTests = addrResults,
+        summary = $"{totalPassed}/{totalTests} passed"
+    });
 });
 
 app.MapBlazorHub();
