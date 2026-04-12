@@ -1,0 +1,100 @@
+@page "/listings"
+@using RealEstateMinsk.Models
+@using RealEstateMinsk.Services
+
+@inject ListingService ListingService
+@inject NavigationManager Nav
+
+<PageTitle>Объявления</PageTitle>
+
+<h4>Фильтры</h4>
+<div class="row g-3 mb-4">
+    <div class="col-md-2">
+        <select class="form-select" @bind="filter.District">
+            <option value="">Все районы</option>
+            @foreach (var d in districts)
+            {
+                <option value="@d">@d</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-2">
+        <select class="form-select" @bind="filter.Rooms">
+            <option value="0">Комнаты</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4+</option>
+        </select>
+    </div>
+    <div class="col-md-2">
+        <select class="form-select" @bind="filter.FlatType">
+            <option value="">Тип дома</option>
+            @foreach (var t in flatTypes)
+            {
+                <option value="@t">@t</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-2">
+        <input type="number" class="form-control" placeholder="Мин. цена $" @bind="filter.MinPrice">
+    </div>
+    <div class="col-md-2">
+        <input type="number" class="form-control" placeholder="Макс. цена $" @bind="filter.MaxPrice">
+    </div>
+    <div class="col-md-2">
+        <button class="btn btn-primary w-100" @onclick="ApplyFilter">Применить</button>
+    </div>
+</div>
+
+<h4>Найдено: @listings.Count</h4>
+@foreach (var item in listings)
+{
+    <div class="listing-card">
+        <div class="row">
+            <div class="col-md-8">
+                <h5>@item.Title</h5>
+                <p class="mb-1 text-muted">@item.Location</p>
+                <span class="badge badge-type">@item.FlatType</span>
+                <span class="badge badge-district">@item.District</span>
+                <span class="badge bg-secondary">@item.Rooms ком.</span>
+                <span class="badge bg-info">@item.Area м²</span>
+                
+                <InvestmentCard Listing="item" ShowForecast="false" />
+            </div>
+            <div class="col-md-4 text-end">
+                <div class="price-tag">$@item.PriceUsd.ToString("N0")</div>
+                <small>$@item.PricePerSqm.ToString("N0")/м²</small>
+                <i class="bi bi-star-fill fs-4 interesting-btn @(item.IsInteresting ? "active" : "")"
+                   @onclick="() => ToggleInteresting(item.Id)" style="cursor: pointer; display: block; margin-top: 10px;"></i>
+                <a href="@item.Url" target="_blank" class="btn btn-primary btn-sm mt-2">Открыть</a>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<Listing> listings = new();
+    private List<string> districts = new();
+    private List<string> flatTypes = new();
+    private ListingFilter filter = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        districts = await ListingService.GetDistrictsAsync();
+        flatTypes = await ListingService.GetFlatTypesAsync();
+        listings = await ListingService.GetListingsAsync(filter);
+    }
+
+    async void ApplyFilter()
+    {
+        listings = await ListingService.GetListingsAsync(filter);
+    }
+
+    async void ToggleInteresting(int id)
+    {
+        await ListingService.ToggleInterestingAsync(id);
+        var item = listings.FirstOrDefault(l => l.Id == id);
+        if (item != null) item.IsInteresting = !item.IsInteresting;
+    }
+}

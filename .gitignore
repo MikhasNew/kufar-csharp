@@ -1,0 +1,29 @@
+## [Visual Studio]
+.vs/
+[Bb]in/
+[Oo]bj/
+*.user
+*.userosscache
+*.sln.docstates
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## [Output]
+*.exe
+*.pdb
+*.dll
+
+## [AI Artifacts]
+implementation_plan*.md
+task*.md
+TESTING.md
+ROADMAP.md
+QUICKSTART.md
+FIXES.md
+IMPLEMENTATION_REPORT.md

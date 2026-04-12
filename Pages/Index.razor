@@ -1,0 +1,176 @@
+@page "/"
+@using RealEstateMinsk.Models
+@using RealEstateMinsk.Services
+
+@inject ListingService ListingService
+@inject KufarScraper Scraper
+@inject IConfiguration Configuration
+
+<PageTitle>Минск Недвижимость - Обзор</PageTitle>
+
+<div class="row mb-4">
+    <div class="col-12 d-flex align-items-center flex-wrap gap-2">
+        <div class="d-flex align-items-center">
+            <label for="maxPages" class="form-label mb-0 me-2 text-nowrap">
+                <i class="bi bi-layers"></i> Страниц парсинга:
+            </label>
+            <input type="number"
+                   id="maxPages"
+                   class="form-control"
+                   style="width: 80px;"
+                   min="1"
+                   max="20"
+                   step="1"
+                   @bind="maxPages"
+                   @bind:event="oninput" />
+        </div>
+        <button class="btn btn-primary" @onclick="RefreshData" disabled="@isLoading">
+            @if (isLoading)
+            {
+                <span class="spinner-border spinner-border-sm me-2"></span>
+            }
+            <i class="bi bi-download"></i> @(isLoading ? "Загрузка..." : "Обновить данные")
+        </button>
+        <button class="btn btn-warning" @onclick="SeedTestData" disabled="@isLoading">
+            <i class="bi bi-database-fill-gear"></i> Наполнить базу (80 тестовых)
+        </button>
+        @if (!string.IsNullOrEmpty(statusMessage))
+        {
+            <span class="ms-2 badge bg-success">@statusMessage</span>
+        }
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="stat-card">
+            <h6 class="text-muted">Всего объявлений</h6>
+            <h2>@stats.TotalListings</h2>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <h6 class="text-muted">Средняя цена/м²</h6>
+            <h2>$@stats.AvgPriceSqm.ToString("N0")</h2>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <h6 class="text-muted">Средняя цена</h6>
+            <h2>$@stats.AvgPrice.ToString("N0")</h2>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <h6 class="text-muted">Районов</h6>
+            <h2>@stats.ByDistrict.Count</h2>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="chart-container">
+            <h5>По районам</h5>
+            <table class="table table-sm">
+                <thead><tr><th>Район</th><th>Кол-во</th><th>$/м²</th></tr></thead>
+                <tbody>
+                    @foreach (var d in stats.ByDistrict)
+                    {
+                        <tr><td>@d.Key</td><td>@d.Count</td><td>$@d.AvgPrice.ToString("N0")</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="chart-container">
+            <h5>По типу дома</h5>
+            <table class="table table-sm">
+                <thead><tr><th>Тип</th><th>Кол-во</th><th>$/м²</th></tr></thead>
+                <tbody>
+                    @foreach (var t in stats.ByType)
+                    {
+                        <tr><td>@t.Key</td><td>@t.Count</td><td>$@t.AvgPrice.ToString("N0")</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<h4>Последние объявления</h4>
+<div class="row">
+    @foreach (var item in recentListings)
+    {
+        <div class="col-md-4">
+            <ListingCard Listing="item" />
+        </div>
+    }
+</div>
+
+@code {
+    private MarketStats stats = new();
+    private List<Listing> recentListings = new();
+    private bool isLoading = false;
+    private string statusMessage = "";
+    private int maxPages = 5;
+
+    protected override async Task OnInitializedAsync()
+    {
+        maxPages = Configuration.GetValue<int>("DataCollection:MaxPagesPerRun", 5);
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        stats = await ListingService.GetStatsAsync();
+        recentListings = await ListingService.GetListingsAsync();
+        recentListings = recentListings.Take(6).ToList();
+    }
+
+    private async Task RefreshData()
+    {
+        isLoading = true;
+        statusMessage = "";
+        try
+        {
+            var listings = await Scraper.ScrapeAsync(maxPages);
+            var saved = await ListingService.SaveListingsAsync(listings);
+            statusMessage = $"Получено {listings.Count}, сохранено {saved}";
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"Ошибка: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task SeedTestData()
+    {
+        isLoading = true;
+        statusMessage = "";
+        try
+        {
+            using var http = new HttpClient();
+            var response = await http.PostAsJsonAsync("/api/seed", new { });
+            var result = await response.Content.ReadFromJsonAsync<SeedResult>();
+            statusMessage = result?.Message ?? "Готово";
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"Ошибка: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private record SeedResult(string Message);
+}

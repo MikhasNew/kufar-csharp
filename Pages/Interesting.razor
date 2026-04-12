@@ -1,0 +1,40 @@
+@page "/interesting"
+@using RealEstateMinsk.Models
+
+@inject ListingService ListingService
+
+<PageTitle>Избранное</PageTitle>
+
+<h4>Избранные объявления</h4>
+@if (listings.Count == 0)
+{
+    <p class="text-muted">Нет избранных объявлений</p>
+}
+@foreach (var item in listings)
+{
+    <div class="listing-card">
+        <div class="row">
+            <div class="col-md-8">
+                <h5>@item.Title</h5>
+                <p class="mb-1 text-muted">@item.Location</p>
+                <span class="badge badge-type">@item.FlatType</span>
+                <span class="badge badge-district">@item.District</span>
+                <span class="badge bg-secondary">@item.Rooms ком.</span>
+            </div>
+            <div class="col-md-4 text-end">
+                <div class="price-tag">$@item.PriceUsd.ToString("N0")</div>
+                <small>$@item.PricePerSqm.ToString("N0")/м²</small>
+                <a href="@item.Url" target="_blank" class="btn btn-primary btn-sm mt-2">Открыть</a>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<Listing> listings = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        listings = await ListingService.GetListingsAsync(new ListingFilter { InterestingOnly = true });
+    }
+}

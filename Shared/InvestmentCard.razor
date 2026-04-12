@@ -1,0 +1,143 @@
+@using RealEstateMinsk.Models
+@using RealEstateMinsk.Services
+
+@inject IInvestmentAnalyzer InvestmentAnalyzer
+
+@if (score != null)
+{
+    <div class="investment-score mt-2 p-2 rounded" style="background: #f8f9fa; font-size: 0.85rem;">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+                <span class="fw-bold">📊 Инвест. Score:</span>
+                <button class="btn btn-sm btn-link p-0 ms-1 text-muted" @onclick="() => showInfo = !showInfo" title="Как считается?">
+                    <i class="bi bi-info-circle"></i>
+                </button>
+            </div>
+            <span class="badge @(GetScoreBadgeClass(score.TotalScore)) fs-6">@score.TotalScore</span>
+        </div>
+        
+        <div class="mb-2 pb-2 border-bottom" style="font-size: 0.75rem;">
+            <i class="bi bi-geo-alt text-muted"></i> 
+            <span class="text-secondary">@Listing.District</span>
+            @if (Listing.IsDistrictAutoDetected)
+            {
+                <span class="ms-1" title="Район определен автоматически (OSM/Аналитика)">🧭</span>
+            }
+        </div>
+
+        <div class="d-flex justify-content-between mb-1">
+            <small class="text-muted">Цена:</small>
+            <div class="progress flex-grow-1 mx-2" style="height: 8px;">
+                <div class="progress-bar @(score.PriceAttractiveness > 60 ? "bg-success" : score.PriceAttractiveness > 40 ? "bg-warning" : "bg-danger")"
+                     style="width: @score.PriceAttractiveness%"></div>
+            </div>
+            <small>@score.PriceAttractiveness</small>
+        </div>
+        <div class="d-flex justify-content-between mb-1">
+            <small class="text-muted">Локация:</small>
+            <div class="progress flex-grow-1 mx-2" style="height: 8px;">
+                <div class="progress-bar bg-info" style="width: @score.LocationScore%"></div>
+            </div>
+            <small>@score.LocationScore</small>
+        </div>
+        <div class="d-flex justify-content-between mb-1">
+            <small class="text-muted">Рост:</small>
+            <div class="progress flex-grow-1 mx-2" style="height: 8px;">
+                <div class="progress-bar @(score.GrowthPotential > 60 ? "bg-success" : score.GrowthPotential > 40 ? "bg-warning" : "bg-danger")"
+                     style="width: @score.GrowthPotential%"></div>
+            </div>
+            <small>@score.GrowthPotential</small>
+        </div>
+        <div class="d-flex justify-content-between mb-2">
+            <small class="text-muted">Ликвидность:</small>
+            <div class="progress flex-grow-1 mx-2" style="height: 8px;">
+                <div class="progress-bar @(score.LiquidityScore > 60 ? "bg-success" : score.LiquidityScore > 40 ? "bg-warning" : "bg-danger")"
+                     style="width: @score.LiquidityScore%"></div>
+            </div>
+            <small>@score.LiquidityScore</small>
+        </div>
+        <div class="d-flex justify-content-between align-items-center">
+            <span class="badge @(GetRecommendationBadgeClass(score.Recommendation))">
+                @(GetRecommendationText(score.Recommendation))
+            </span>
+            @if (forecast != null)
+            {
+                <small class="text-muted">
+                    Прогноз: <span class="text-@(forecast.ForecastedPrice > forecast.CurrentPrice ? "success" : "danger") fw-bold">
+                        $@forecast.ForecastedPrice.ToString("N0")
+                    </span>
+                </small>
+            }
+        </div>
+        @if (showInfo)
+        {
+            <div class="alert alert-secondary mt-3 mb-0 p-2" style="font-size: 0.75rem;">
+                <strong>Анализ этого объекта:</strong>
+                <ul class="mb-1 ps-3">
+                    <li><strong>Цена:</strong> @score.PriceRationale</li>
+                    <li><strong>Локация:</strong> @score.LocationRationale</li>
+                    <li><strong>Рост:</strong> @score.GrowthRationale</li>
+                    <li><strong>Ликвидность:</strong> @score.LiquidityRationale</li>
+                </ul>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public Listing Listing { get; set; } = default!;
+    [Parameter] public bool ShowForecast { get; set; } = true;
+
+    private InvestmentScore? score;
+    private PriceForecast? forecast;
+    private bool showInfo = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            score = await InvestmentAnalyzer.CalculateScoreAsync(Listing);
+
+            if (ShowForecast)
+            {
+                forecast = await InvestmentAnalyzer.ForecastPriceAsync(Listing, 6);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка расчета score для listing {Listing.Id}: {ex.Message}");
+        }
+    }
+
+    private string GetScoreBadgeClass(double score)
+    {
+        return score switch
+        {
+            >= 70 => "bg-success",
+            >= 50 => "bg-warning",
+            _ => "bg-danger"
+        };
+    }
+
+    private string GetRecommendationBadgeClass(string recommendation)
+    {
+        return recommendation switch
+        {
+            "Buy" => "bg-success",
+            "Hold" => "bg-warning",
+            "Avoid" => "bg-danger",
+            _ => "bg-secondary"
+        };
+    }
+
+    private string GetRecommendationText(string recommendation)
+    {
+        return recommendation switch
+        {
+            "Buy" => "✅ Покупать",
+            "Hold" => "⏸️ Держать",
+            "Avoid" => "❌ Избегать",
+            _ => recommendation
+        };
+    }
+}

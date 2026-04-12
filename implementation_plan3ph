@@ -1,0 +1,193 @@
+# План: Гео-поиск аналогов в радиусе 1 км для инвестиционного скоринга
+
+## Контекст проекта
+- **Язык**: C# / .NET 8 / Blazor Server
+- **Файл для правок**: `d:\repo\куфар анализ-csharp\Services\InvestmentAnalyzer.cs` (529 строк)
+- **Запуск**: `dotnet run` из корня `d:\repo\куфар анализ-csharp`
+- **Тест**: `POST http://localhost:5000/api/scoring/recalculate`
+
+## Модель `Listing` (поля, используемые в этом плане)
+```
+PricePerSqm (double), Area (double),
+Latitude (double?), Longitude (double?),
+District (string), FlatType (string)
+```
+
+## Цель
+Метод `CalculatePriceAttractivenessAsync` сейчас сравнивает цену квартиры со средней по **району**. Нужно добавить более точное сравнение — со средней ценой **аналогичных по метражу** квартир в радиусе **1 км**.
+
+---
+
+## Шаг 1: Добавить хелпер-методы для расчета расстояния
+
+### Что делать
+**Файл**: `Services/InvestmentAnalyzer.cs`
+
+**Найти** (строка 527–528):
+```csharp
+    }
+}
+```
+(Это закрывающие скобки метода `GenerateRecommendation` и класса `InvestmentAnalyzer`)
+
+**Заменить на**:
+```csharp
+    }
+
+    // ==================== GEO HELPER METHODS ====================
+
+    /// <summary>
+    /// Расстояние между двумя GPS-точками в километрах (формула Гаверсинуса)
+    /// </summary>
+    private static double CalculateDistanceKm(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double R = 6371.0; // Радиус Земли в км
+        var dLat = ToRadians(lat2 - lat1);
+        var dLon = ToRadians(lon2 - lon1);
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(ToRadians(lat1)) * Math.Cos(ToRadians(lat2)) *
+                Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        return R * c;
+    }
+
+    private static double ToRadians(double degrees) => degrees * Math.PI / 180.0;
+}
+```
+
+### Проверка
+Выполнить `dotnet build` из `d:\repo\куфар анализ-csharp`. Ошибок компиляции быть не должно.
+
+---
+
+## Шаг 2: Переписать `CalculatePriceAttractivenessAsync` с гео-поиском
+
+### Что делать
+**Файл**: `Services/InvestmentAnalyzer.cs`
+
+**Найти** (строки 354–383, весь метод `CalculatePriceAttractivenessAsync`):
+```csharp
+    private async Task<double> CalculatePriceAttractivenessAsync(Listing listing)
+    {
+        // Средняя цена/м² по району
+        var districtListings = await _ctx.Listings
+            .Where(l => l.District == listing.District && l.District != "Unknown")
+            .ToListAsync();
+        var districtAvg = districtListings.Any() ? districtListings.Average(l => l.PricePerSqm) : 0;
+
+        // Средняя цена/м² по типу квартиры
+        var typeListings = await _ctx.Listings
+            .Where(l => l.FlatType == listing.FlatType && l.FlatType != "Другой")
+            .ToListAsync();
+        var typeAvg = typeListings.Any() ? typeListings.Average(l => l.PricePerSqm) : 0;
+
+        // Общая средняя
+        var allListings = await _ctx.Listings.ToListAsync();
+        var overallAvg = allListings.Any() ? allListings.Average(l => l.PricePerSqm) : 0;
+
+        if (districtAvg == 0 && typeAvg == 0 && overallAvg == 0)
+            return 50; // Нейтральный балл при отсутствии данных
+
+        // Отклонение цены listing от рынка
+        var benchmark = districtAvg > 0 ? districtAvg : (typeAvg > 0 ? typeAvg : overallAvg);
+        var deviation = (benchmark - listing.PricePerSqm) / benchmark;
+
+        // Нормализация в 0-100
+        // -30% от рынка = 100 баллов, +30% = 0 баллов
+        var score = Math.Round((0.5 + deviation / 0.6) * 100, 2);
+        return Math.Clamp(score, 0, 100);
+    }
+```
+
+**Заменить на**:
+```csharp
+    private async Task<double> CalculatePriceAttractivenessAsync(Listing listing)
+    {
+        const double RadiusKm = 1.0;
+        const double AreaTolerancePercent = 0.20; // ±20% по площади считается "аналог"
+
+        double radiusAvg = 0;
+
+        // === Гео-поиск аналогов в радиусе 1 км (если есть координаты) ===
+        if (listing.Latitude.HasValue && listing.Longitude.HasValue)
+        {
+            var lat = listing.Latitude.Value;
+            var lon = listing.Longitude.Value;
+
+            // Bounding Box для быстрой предварительной фильтрации в SQLite
+            var latDiff = RadiusKm / 111.0;
+            var lonDiff = RadiusKm / (111.0 * Math.Cos(ToRadians(lat)));
+            var minLat = lat - latDiff;
+            var maxLat = lat + latDiff;
+            var minLon = lon - lonDiff;
+            var maxLon = lon + lonDiff;
+
+            // Допустимый диапазон площади (±20%)
+            var minArea = listing.Area * (1 - AreaTolerancePercent);
+            var maxArea = listing.Area * (1 + AreaTolerancePercent);
+
+            // Быстрый запрос к БД по "квадрату" + фильтр по метражу
+            var candidates = await _ctx.Listings
+                .Where(l => l.Id != listing.Id
+                    && l.Latitude.HasValue && l.Longitude.HasValue
+                    && l.Latitude >= minLat && l.Latitude <= maxLat
+                    && l.Longitude >= minLon && l.Longitude <= maxLon
+                    && l.Area >= minArea && l.Area <= maxArea)
+                .ToListAsync();
+
+            // Точный фильтр по расстоянию (Гаверсинус)
+            var nearby = candidates
+                .Where(c => CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value) <= RadiusKm)
+                .ToList();
+
+            if (nearby.Count >= 3) // Минимум 3 аналога для статистической значимости
+            {
+                radiusAvg = nearby.Average(l => l.PricePerSqm);
+            }
+        }
+
+        // === Средняя цена/м² по району (фоллбэк) ===
+        var districtListings = await _ctx.Listings
+            .Where(l => l.District == listing.District && l.District != "Unknown")
+            .ToListAsync();
+        var districtAvg = districtListings.Any() ? districtListings.Average(l => l.PricePerSqm) : 0;
+
+        // === Средняя цена/м² по типу квартиры ===
+        var typeListings = await _ctx.Listings
+            .Where(l => l.FlatType == listing.FlatType && l.FlatType != "Другой")
+            .ToListAsync();
+        var typeAvg = typeListings.Any() ? typeListings.Average(l => l.PricePerSqm) : 0;
+
+        // === Общая средняя ===
+        var allListings = await _ctx.Listings.ToListAsync();
+        var overallAvg = allListings.Any() ? allListings.Average(l => l.PricePerSqm) : 0;
+
+        if (radiusAvg == 0 && districtAvg == 0 && typeAvg == 0 && overallAvg == 0)
+            return 50;
+
+        // Приоритет бенчмарка: 1) Радиус 1км → 2) Район → 3) Тип → 4) Общая
+        var benchmark = radiusAvg > 0 ? radiusAvg
+            : (districtAvg > 0 ? districtAvg
+            : (typeAvg > 0 ? typeAvg : overallAvg));
+
+        var deviation = (benchmark - listing.PricePerSqm) / benchmark;
+
+        // Нормализация в 0-100
+        var score = Math.Round((0.5 + deviation / 0.6) * 100, 2);
+        return Math.Clamp(score, 0, 100);
+    }
+```
+
+### Проверка
+1. `dotnet build` — без ошибок.
+2. Запустить приложение: `dotnet run`.
+3. Вызвать: `POST http://localhost:5000/api/scoring/recalculate`.
+4. Ответ `200 OK` означает, что расчет прошел без исключений.
+
+---
+
+## Финальная проверка (после обоих шагов)
+1. `dotnet build` — 0 ошибок.
+2. `dotnet run`
+3. `POST /api/scoring/recalculate` — пересчитывается без ошибок.
+4. В логах (консоли) должна быть строка: `Пересчитано N инвестиционных скорингов`.

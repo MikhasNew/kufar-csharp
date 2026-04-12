@@ -1,0 +1,39 @@
+@using RealEstateMinsk.Models
+@using RealEstateMinsk.Services
+
+@inject ListingService ListingService
+@inject NavigationManager Nav
+
+<div class="listing-card">
+    <div class="d-flex justify-content-between align-items-start">
+        <h6 class="mb-1 text-truncate" style="max-width: 70%;">@Listing.Title</h6>
+        <i class="bi bi-star-fill interesting-btn @(Listing.IsInteresting ? "active" : "")" 
+           @onclick="ToggleInteresting" style="cursor: pointer;"></i>
+    </div>
+    <div class="price-tag">$@Listing.PriceUsd.ToString("N0")</div>
+    <small>@Listing.Area м² • @Listing.Rooms ком • $@Listing.PricePerSqm.ToString("N0")/м²</small>
+    <div class="mt-2">
+        <span class="badge badge-type">@Listing.FlatType</span>
+        <span class="badge badge-district">
+            @Listing.District
+            @if (Listing.IsDistrictAutoDetected)
+            {
+                <span title="Район определен автоматически (OSM/Аналитика)">🧭</span>
+            }
+        </span>
+    </div>
+    <a href="@Listing.Url" target="_blank" class="btn btn-sm btn-outline-primary mt-2 w-100">
+        <i class="bi bi-box-arrow-up-right"></i> Открыть
+    </a>
+</div>
+
+@code {
+    [Parameter] public Listing Listing { get; set; } = null!;
+
+    async void ToggleInteresting()
+    {
+        await ListingService.ToggleInterestingAsync(Listing.Id);
+        Listing.IsInteresting = !Listing.IsInteresting;
+        StateHasChanged();
+    }
+}

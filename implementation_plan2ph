@@ -1,0 +1,277 @@
+# План: Система Инвестиционного Скоринга (Фаза 2)
+
+## Контекст проекта
+- **Язык**: C# / .NET 8 / Blazor Server
+- **Единственный файл для правок**: `d:\repo\куфар анализ-csharp\Services\InvestmentAnalyzer.cs` (481 строка)
+- **Второй файл (только Шаг 5)**: `d:\repo\куфар анализ-csharp\Program.cs` (63 строки)
+- **Модели (только чтение)**: `d:\repo\куфар анализ-csharp\Models\Models.cs`
+- **Запуск**: `dotnet run` из корня `d:\repo\куфар анализ-csharp`
+- **Тест API**: `POST http://localhost:5000/api/scrape?pages=1`
+
+## Модель `Listing` (поля, которые используются в скоринге)
+```
+PriceUsd (int), PricePerSqm (double), Area (double), Rooms (int),
+District (string), FlatType (string), Description (string),
+Floor (int?), TotalFloors (int?), YearBuilt (int?),
+Latitude (double?), Longitude (double?), ImageUrl (string?),
+ScrapedAt (string — ISO 8601)
+```
+
+## Модель `PriceHistory` (таблица для трендов)
+```
+Id (int), ListingId (int), PriceUsd (int), PricePerSqm (double), RecordedAt (string)
+```
+
+---
+
+## Шаг 1: Исправить баг в `FindUndervaluedAsync`
+
+### Что делать
+**Файл**: `Services/InvestmentAnalyzer.cs`, строки **131–155**
+
+**Найти** (строки 138–140):
+```csharp
+            var districtAvg = await _ctx.Listings
+                .Where(l => l.District == listing.District && l.District != "Unknown")
+                .AverageAsync(l => l.PricePerSqm);
+```
+
+**Заменить на**:
+```csharp
+            var districtListings = await _ctx.Listings
+                .Where(l => l.District == listing.District && l.District != "Unknown")
+                .ToListAsync();
+            
+            if (!districtListings.Any()) continue;
+            
+            var districtAvg = districtListings.Average(l => l.PricePerSqm);
+```
+
+### Проверка
+1. Запустить проект: `dotnet run`
+2. Открыть `http://localhost:5000` → перейти на страницу «Инвестиции»
+3. Страница НЕ должна падать с ошибкой. Логи не должны содержать `Sequence contains no elements`
+
+---
+
+## Шаг 2: Добавить Этажность и Год постройки в `CalculateLiquidityScore`
+
+### Что делать
+**Файл**: `Services/InvestmentAnalyzer.cs`, строки **408–433**
+
+**Найти** (строки 426–432):
+```csharp
+        // Тип дома
+        if (listing.FlatType == "Новостройка")
+            score += 10;
+        else if (listing.FlatType == "Кирпичный")
+            score += 5;
+
+        return Math.Clamp(score, 0, 100);
+```
+
+**Заменить на**:
+```csharp
+        // Тип дома
+        if (listing.FlatType == "Новостройка")
+            score += 10;
+        else if (listing.FlatType == "Кирпичный")
+            score += 5;
+
+        // Этажность: штраф за 1-й и последний этаж
+        if (listing.Floor.HasValue)
+        {
+            if (listing.Floor == 1)
+                score -= 10;
+            else if (listing.TotalFloors.HasValue && listing.Floor == listing.TotalFloors)
+                score -= 10;
+        }
+
+        // Год постройки
+        if (listing.YearBuilt.HasValue)
+        {
+            if (listing.YearBuilt < 1975)
+                score -= 10; // Старый фонд (хрущевки)
+            else if (listing.YearBuilt >= 2015)
+                score += 15; // Современный дом
+            else if (listing.YearBuilt >= 2000)
+                score += 5;  // Относительно новый
+        }
+
+        return Math.Clamp(score, 0, 100);
+```
+
+### Проверка
+1. Пересобрать: `dotnet build`
+2. Убедиться, что сборка прошла без ошибок
+3. Запустить, вызвать `POST /api/scrape?pages=1` — скоринги пересчитаются автоматически
+
+---
+
+## Шаг 3: Переписать `GetMarketTrendAsync` на базе `PriceHistories`
+
+### Что делать
+**Файл**: `Services/InvestmentAnalyzer.cs`, строки **160–204**
+
+**Найти** весь метод `GetMarketTrendAsync` (строки 160–204).
+
+**Заменить на**:
+```csharp
+    public async Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30)
+    {
+        var startDate = DateTime.UtcNow.AddDays(-daysBack);
+        var startDateStr = startDate.ToString("o");
+
+        // Запрашиваем историю цен за указанный период
+        IQueryable<PriceHistory> historyQuery = _ctx.PriceHistories
+            .Include(h => h.Listing != null ? null : null) // для Join
+            .Join(_ctx.Listings,
+                h => h.ListingId,
+                l => l.Id,
+                (h, l) => new { History = h, Listing = l });
+
+        // Фильтрация по району (альтернативный подход без Join)
+        var allListings = _ctx.Listings.AsQueryable();
+        if (!string.IsNullOrEmpty(district))
+        {
+            allListings = allListings.Where(l => l.District == district);
+        }
+        var listingIds = await allListings.Select(l => l.Id).ToListAsync();
+
+        // Все записи истории цен для нужных объявлений
+        var allHistory = await _ctx.PriceHistories
+            .Where(h => listingIds.Contains(h.ListingId))
+            .ToListAsync();
+
+        // Разделяем на «старые» и «новые» записи
+        var recentHistory = allHistory.Where(h =>
+        {
+            if (DateTime.TryParse(h.RecordedAt, out var parsed))
+                return parsed >= startDate;
+            return false;
+        }).ToList();
+
+        var olderHistory = allHistory.Where(h =>
+        {
+            if (DateTime.TryParse(h.RecordedAt, out var parsed))
+                return parsed < startDate;
+            return false;
+        }).ToList();
+
+        // Если нет исторических данных, используем текущие цены из Listings
+        var currentListings = await allListings.ToListAsync();
+        var currentAvg = currentListings.Any() ? currentListings.Average(l => l.PricePerSqm) : 0;
+        var previousAvg = olderHistory.Any()
+            ? olderHistory.Average(h => h.PricePerSqm)
+            : currentAvg; // Если старых данных нет, тренд = 0%
+
+        var trend = new MarketTrend
+        {
+            District = district ?? "All",
+            CurrentAvgPrice = Math.Round(currentAvg, 2),
+            PreviousAvgPrice = Math.Round(previousAvg, 2),
+            SampleSize = currentListings.Count,
+            PeriodStart = startDate,
+            PeriodEnd = DateTime.UtcNow
+        };
+
+        if (trend.PreviousAvgPrice > 0)
+        {
+            trend.ChangePercent = Math.Round(
+                (trend.CurrentAvgPrice - trend.PreviousAvgPrice) / trend.PreviousAvgPrice * 100, 2);
+
+            trend.Trend = trend.ChangePercent switch
+            {
+                > 2 => "Growing",
+                < -2 => "Declining",
+                _ => "Stable"
+            };
+        }
+
+        return trend;
+    }
+```
+
+### Проверка
+1. `dotnet build` — без ошибок
+2. Запустить и вызвать `POST /api/scrape?pages=1`
+3. В логах НЕ должно быть ошибок при `GetMarketTrendAsync`
+
+---
+
+## Шаг 4: Защита от пустых данных в `CalculateGrowthPotentialAsync`
+
+### Что делать
+**Файл**: `Services/InvestmentAnalyzer.cs`, строки **376–403**
+
+**Найти** (строки 395–400):
+```csharp
+        // Бонус для недооцененных районов (ниже среднего)
+        var overallAvg = await _ctx.Listings.AverageAsync(l => l.PricePerSqm);
+        if (listing.PricePerSqm < overallAvg * 0.85)
+        {
+            score += 10; // Бонус за потенциал
+        }
+```
+
+**Заменить на**:
+```csharp
+        // Бонус для недооцененных районов (ниже среднего)
+        var allListings = await _ctx.Listings.ToListAsync();
+        if (allListings.Any())
+        {
+            var overallAvg = allListings.Average(l => l.PricePerSqm);
+            if (listing.PricePerSqm < overallAvg * 0.85)
+            {
+                score += 10; // Бонус за потенциал
+            }
+        }
+```
+
+### Проверка
+1. `dotnet build` — без ошибок
+2. Если БД пуста (0 объявлений), метод не должен падать
+
+---
+
+## Шаг 5: Добавить API эндпоинт для ручного пересчёта скоринга
+
+### Что делать
+**Файл**: `Program.cs`, строки **58** (после закрывающей `}` эндпоинта `/api/scrape`)
+
+**Найти** (строка 58):
+```csharp
+});
+```
+(Это закрывающая скобка эндпоинта `MapPost("/api/scrape", ...)`)
+
+**Добавить ПОСЛЕ неё** (перед строкой `app.MapBlazorHub();`):
+```csharp
+
+app.MapPost("/api/scoring/recalculate", async (IInvestmentAnalyzer analyzer) =>
+{
+    try
+    {
+        await analyzer.RecalculateAllScoresAsync();
+        return Results.Ok(new { message = "Скоринги пересчитаны" });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
+```
+
+### Проверка
+1. `dotnet build` — без ошибок
+2. Запустить, вызвать `POST http://localhost:5000/api/scoring/recalculate`
+3. Ответ должен быть `200 OK` с сообщением `"Скоринги пересчитаны"`
+
+---
+
+## Финальная проверка (после всех 5 шагов)
+1. `dotnet build` — 0 ошибок, 0 предупреждений
+2. `dotnet run`
+3. `POST /api/scrape?pages=1` — данные собираются и скоринги пересчитываются
+4. `POST /api/scoring/recalculate` — ручной пересчёт работает
+5. Открыть `http://localhost:5000` → страница «Инвестиции» загружается без ошибок

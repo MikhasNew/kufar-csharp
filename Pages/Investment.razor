@@ -1,0 +1,294 @@
+@page "/investment"
+@using RealEstateMinsk.Models
+@using RealEstateMinsk.Services
+
+@inject IInvestmentAnalyzer InvestmentAnalyzer
+@inject ListingService ListingService
+
+<PageTitle>Инвестиционный Анализ</PageTitle>
+
+<h4><i class="bi bi-graph-up-arrow"></i> Инвестиционный Анализ</h4>
+
+<!-- Summary Cards -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="stat-card border-start border-success border-3">
+            <h6 class="text-muted">Топ возможностей</h6>
+            <h2 class="text-success">@topListings.Count</h2>
+            <small>с рекомендацией "Buy"</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card border-start border-warning border-3">
+            <h6 class="text-muted">Недооцененных</h6>
+            <h2 class="text-warning">@undervaluedCount</h2>
+            <small>ниже рынка на 15%+</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card border-start border-info border-3">
+            <h6 class="text-muted">Лучший район</h6>
+            <h5>@comparativeAnalysis.BestValueDistrict</h5>
+            <small>по инвест. индексу</small>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card border-start border-primary border-3">
+            <h6 class="text-muted">Растущий район</h6>
+            <h5>@comparativeAnalysis.FastestGrowingDistrict</h5>
+            <small>быстрый рост цен</small>
+        </div>
+    </div>
+</div>
+
+<!-- Action Buttons -->
+<div class="row mb-4">
+    <div class="col-12">
+        <button class="btn btn-success" @onclick="RecalculateScores" disabled="@isCalculating">
+            @if (isCalculating)
+            {
+                <span class="spinner-border spinner-border-sm me-2"></span>
+            }
+            <i class="bi bi-calculator"></i> @(isCalculating ? "Расчет..." : "Пересчитать скоринги")
+        </button>
+        <span class="ms-3 text-muted">Последний расчет: @lastCalculationTime</span>
+    </div>
+</div>
+
+<!-- Top Investment Opportunities -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0"><i class="bi bi-trophy"></i> Топ Инвестиционных Возможностей</h5>
+            </div>
+            <div class="card-body">
+                @if (topListings.Any())
+                {
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Score</th>
+                                    <th>Рекомендация</th>
+                                    <th>Название</th>
+                                    <th>Район</th>
+                                    <th>Цена</th>
+                                    <th>$/м²</th>
+                                    <th>Комнат</th>
+                                    <th>Площадь</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var item in topListingsWithScores)
+                                {
+                                    <tr>
+                                        <td>@item.Counter</td>
+                                        <td>
+                                            <span class="badge @(GetScoreBadgeClass(item.Score.TotalScore))">
+                                                @item.Score.TotalScore
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <span class="badge @(GetRecommendationBadgeClass(item.Score.Recommendation))">
+                                                @GetRecommendationText(item.Score.Recommendation)
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <strong>@item.Listing.Title</strong>
+                                        </td>
+                                        <td><span class="badge badge-district">@item.Listing.District</span></td>
+                                        <td class="price-tag">$@item.Listing.PriceUsd.ToString("N0")</td>
+                                        <td>$@item.Listing.PricePerSqm.ToString("N0")</td>
+                                        <td>@item.Listing.Rooms</td>
+                                        <td>@item.Listing.Area.ToString("F1") м²</td>
+                                        <td>
+                                            <a href="@item.Listing.Url" target="_blank" class="btn btn-sm btn-outline-primary">
+                                                <i class="bi bi-box-arrow-up-right"></i>
+                                            </a>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                else
+                {
+                    <div class="text-center py-4">
+                        <i class="bi bi-info-circle fa-2x text-muted"></i>
+                        <p class="text-muted mt-2">Нажмите "Пересчитать скоринги" для анализа</p>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- District Comparison -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0"><i class="bi bi-bar-chart"></i> Сравнительный Анализ Районов</h5>
+            </div>
+            <div class="card-body">
+                @if (comparativeAnalysis.Districts.Any())
+                {
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Район</th>
+                                    <th>Средняя $/м²</th>
+                                    <th>Объявлений</th>
+                                    <th>Средний Score</th>
+                                    <th>Рост %</th>
+                                    <th>Инвест. Индекс</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var district in comparativeAnalysis.Districts)
+                                {
+                                    <tr>
+                                        <td><strong>@district.Name</strong></td>
+                                        <td>$@district.AvgPricePerSqm.ToString("N0")</td>
+                                        <td>@district.ListingCount</td>
+                                        <td>
+                                            <span class="badge bg-info">@district.AvgScore</span>
+                                        </td>
+                                        <td>
+                                            @if (district.GrowthRate > 0)
+                                            {
+                                                <span class="text-success"><i class="bi bi-arrow-up"></i> @district.GrowthRate%</span>
+                                            }
+                                            else if (district.GrowthRate < 0)
+                                            {
+                                                <span class="text-danger"><i class="bi bi-arrow-down"></i> @district.GrowthRate%</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted">—</span>
+                                            }
+                                        </td>
+                                        <td>
+                                            <div class="progress" style="height: 25px;">
+                                                <div class="progress-bar @(district.InvestmentIndex > 70 ? "bg-success" : district.InvestmentIndex > 50 ? "bg-warning" : "bg-danger")"
+                                                     style="width: @district.InvestmentIndex%">
+                                                    @district.InvestmentIndex
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            @if (district.Name == comparativeAnalysis.BestValueDistrict)
+                                            {
+                                                <span class="badge bg-success"><i class="bi bi-trophy"></i> Лучший</span>
+                                            }
+                                            @if (district.Name == comparativeAnalysis.FastestGrowingDistrict)
+                                            {
+                                                <span class="badge bg-primary"><i class="bi bi-graph-up"></i> Растущий</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<Listing> topListings = new();
+    private List<(Listing Listing, InvestmentScore Score, int Counter)> topListingsWithScores = new();
+    private List<Listing> undervaluedListings = new();
+    private ComparativeAnalysis comparativeAnalysis = new();
+    private bool isCalculating = false;
+    private string lastCalculationTime = "Не производился";
+    private int undervaluedCount = 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAnalysisData();
+    }
+
+    private async Task LoadAnalysisData()
+    {
+        // Загружаем сравнительный анализ районов
+        comparativeAnalysis = await InvestmentAnalyzer.CompareDistrictsAsync();
+        
+        // Загружаем топ инвестицийых возможностей
+        topListings = await InvestmentAnalyzer.GetTopInvestmentOpportunitiesAsync(20);
+        
+        // Получаем скоринги для отображения
+        topListingsWithScores = new();
+        int counter = 1;
+        foreach (var listing in topListings)
+        {
+            var score = await InvestmentAnalyzer.CalculateScoreAsync(listing);
+            topListingsWithScores.Add((listing, score, counter++));
+        }
+
+        // Считаем недооцененные
+        undervaluedListings = await InvestmentAnalyzer.FindUndervaluedAsync(15);
+        undervaluedCount = undervaluedListings.Count;
+    }
+
+    private async Task RecalculateScores()
+    {
+        isCalculating = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await InvestmentAnalyzer.RecalculateAllScoresAsync();
+            await LoadAnalysisData();
+            lastCalculationTime = DateTime.Now.ToString("HH:mm:ss");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка при пересчете: {ex.Message}");
+        }
+        finally
+        {
+            isCalculating = false;
+        }
+    }
+
+    private string GetScoreBadgeClass(double score)
+    {
+        return score switch
+        {
+            >= 70 => "bg-success",
+            >= 50 => "bg-warning",
+            _ => "bg-danger"
+        };
+    }
+
+    private string GetRecommendationBadgeClass(string recommendation)
+    {
+        return recommendation switch
+        {
+            "Buy" => "bg-success",
+            "Hold" => "bg-warning",
+            "Avoid" => "bg-danger",
+            _ => "bg-secondary"
+        };
+    }
+
+    private string GetRecommendationText(string recommendation)
+    {
+        return recommendation switch
+        {
+            "Buy" => "✅ Покупать",
+            "Hold" => "⏸️ Держать",
+            "Avoid" => "❌ Избегать",
+            _ => recommendation
+        };
+    }
+}

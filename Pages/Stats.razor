@@ -1,0 +1,38 @@
+@page "/stats"
+@using RealEstateMinsk.Models
+@using RealEstateMinsk.Services
+
+@inject ListingService ListingService
+
+<PageTitle>Статистика</PageTitle>
+
+<h4>Статистика рынка</h4>
+<div class="row">
+    <div class="col-md-4">
+        <div class="chart-container">
+            <h5>По районам</h5>
+            <canvas id="districtChart"></canvas>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="chart-container">
+            <h5>По типу дома</h5>
+            <canvas id="typeChart"></canvas>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="chart-container">
+            <h5>По комнатам</h5>
+            <canvas id="roomsChart"></canvas>
+        </div>
+    </div>
+</div>
+
+@code {
+    private MarketStats stats = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        stats = await ListingService.GetStatsAsync();
+    }
+}
