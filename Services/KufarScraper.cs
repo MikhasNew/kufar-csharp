@@ -12,13 +12,16 @@ public class KufarScraper
     private readonly MinskGeoService _geo;
     private readonly int _maxRetries = 3;
     private readonly int _retryDelayMs = 2000;
+    private readonly int _pageDelayMs;
+    private readonly Random _random = new();
 
     private const string ApiBaseUrl = "https://api.kufar.by/search-api/v2/search/rendered-paginated";
 
-    public KufarScraper(ILogger<KufarScraper>? logger, MinskGeoService geo)
+    public KufarScraper(ILogger<KufarScraper>? logger, MinskGeoService geo, IConfiguration config)
     {
         _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<KufarScraper>.Instance;
         _geo = geo;
+        _pageDelayMs = config.GetValue<int>("DataCollection:PageDelayMs", 2000);
         
         var handler = new SocketsHttpHandler
         {
@@ -110,15 +113,11 @@ public class KufarScraper
                         _logger.LogInformation("Страница {Page}: получено {Count} объявлений из {TotalOnPage}",
                             page, pageListings.Count, ads.GetArrayLength());
 
-                        // Если объявлений меньше чем size — последняя страница
-                        if (pageListings.Count < 50)
-                        {
-                            _logger.LogInformation("Достигнута последняя страница ({Count} < 50)", pageListings.Count);
-                            shouldBreak = true;
-                        }
+                        // Потоковый скрапинг: надежнее всего полагаться на наличие токена 'next' в пагинации,
+                        // так как количество объявлений на странице может быть меньше 50 даже в середине списка.
+                        string? nextToken = null;
 
-                        // Получаем токен для следующей страницы
-                        if (!shouldBreak && data.RootElement.TryGetProperty("pagination", out var pagination) &&
+                        if (data.RootElement.TryGetProperty("pagination", out var pagination) &&
                             pagination.TryGetProperty("pages", out var pagesArray))
                         {
                             foreach (var pElem in pagesArray.EnumerateArray())
@@ -127,12 +126,14 @@ public class KufarScraper
                                 {
                                     if (pElem.TryGetProperty("token", out var tokenProp))
                                     {
-                                        currentCursor = tokenProp.GetString();
+                                        nextToken = tokenProp.GetString();
                                     }
                                     break;
                                 }
                             }
                         }
+
+                        currentCursor = nextToken;
 
                         if (string.IsNullOrEmpty(currentCursor))
                         {
@@ -166,7 +167,12 @@ public class KufarScraper
 
             if (page < maxPages)
             {
-                await Task.Delay(2000);
+                // Добавляем случайную задержку ±20% для имитации поведения человека
+                var jitter = _random.Next(-(int)(_pageDelayMs * 0.2), (int)(_pageDelayMs * 0.2));
+                var delay = Math.Max(500, _pageDelayMs + jitter);
+                
+                _logger.LogDebug("Ожидание {Delay}мс перед следующей страницей...", delay);
+                await Task.Delay(delay);
             }
         }
 

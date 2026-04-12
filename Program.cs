@@ -19,7 +19,10 @@ builder.Services.AddSingleton<MinskGeoService>();
 builder.Services.AddHostedService<DataCollectionService>();
 
 // KufarScraper с поддержкой логирования и локального геокодера (Singleton для reuse HttpClient)
-builder.Services.AddSingleton(sp => new KufarScraper(sp.GetService<ILogger<KufarScraper>>(), sp.GetRequiredService<MinskGeoService>()));
+builder.Services.AddSingleton(sp => new KufarScraper(
+    sp.GetService<ILogger<KufarScraper>>(), 
+    sp.GetRequiredService<MinskGeoService>(),
+    sp.GetRequiredService<IConfiguration>()));
 
 // Регистрация HttpClient для геокодера Nominatim (с User-Agent)
 builder.Services.AddHttpClient("Nominatim", client =>
