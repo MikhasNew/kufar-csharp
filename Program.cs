@@ -85,6 +85,32 @@ app.MapPost("/api/scoring/recalculate", async (IInvestmentAnalyzer analyzer) =>
     }
 });
 
+app.MapGet("/api/test/enrichment", async (AppDbContext db) =>
+{
+    var total = await db.Listings.CountAsync();
+    var autoDetected = await db.Listings.CountAsync(l => l.IsDistrictAutoDetected);
+    var unknown = await db.Listings.CountAsync(l => l.District == "Unknown");
+    var withCoords = await db.Listings.CountAsync(l => l.Latitude != null);
+    
+    var samples = await db.Listings
+        .Where(l => l.District != "Unknown")
+        .Take(10)
+        .Select(l => new { 
+            l.Id, 
+            l.District, 
+            l.Location,
+            l.IsDistrictAutoDetected,
+            HasCoords = l.Latitude != null,
+            Score = db.InvestmentScores
+                .Where(s => s.ListingId == l.Id)
+                .Select(s => new { s.LocationScore, s.LocationRationale, s.TotalScore })
+                .FirstOrDefault()
+        })
+        .ToListAsync();
+
+    return Results.Ok(new { total, autoDetected, unknown, withCoords, samples });
+});
+
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 

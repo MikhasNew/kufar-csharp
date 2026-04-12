@@ -44,6 +44,18 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         ["Unknown"] = 5.0
     };
 
+    private static readonly Dictionary<string, string> _osmDistrictMapping = new() {
+        {"Центральный район", "Центральный"}, {"Центральны раён", "Центральный"},
+        {"Советский район", "Советский"}, {"Савецкі раён", "Советский"},
+        {"Первомайский район", "Первомайский"}, {"Першамайскі раён", "Первомайский"},
+        {"Партизанский район", "Партизанский"}, {"Партызанскі раён", "Партизанский"},
+        {"Заводской район", "Заводской"}, {"Заводскі раён", "Заводской"},
+        {"Ленинский район", "Ленинский"}, {"Ленінскі раён", "Ленинский"},
+        {"Октябрьский район", "Октябрьский"}, {"Кастрычніцкі раён", "Октябрьский"},
+        {"Московский район", "Московский"}, {"Маскоўскі раён", "Московский"},
+        {"Фрунзенский район", "Фрунзенский"}, {"Фрунзенскі раён", "Фрунзенский"}
+    };
+
     public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory)
     {
         _ctx = ctx;
@@ -61,17 +73,32 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             ListingId = listing.Id
         };
 
-        // Авто-определение района, если его нет
+        // Авто-определение района, если его нет (Hybrid: GPS -> Address)
         if (string.IsNullOrEmpty(listing.District) || listing.District == "Unknown")
         {
             if (listing.Latitude.HasValue && listing.Longitude.HasValue)
             {
                 var (detected, isAuto) = await DetectDistrictAsync(listing.Latitude.Value, listing.Longitude.Value);
-                if (isAuto)
+                if (isAuto && detected != "Unknown")
                 {
                     listing.District = detected;
                     listing.IsDistrictAutoDetected = true;
-                    // Сохраняем обратно в БД для будущего использования
+                    _logger.LogInformation("Район для {ListingId} определен по GPS: {District}", listing.Id, detected);
+                    
+                    _ctx.Listings.Update(listing);
+                    await _ctx.SaveChangesAsync();
+                }
+            }
+            
+            if ((string.IsNullOrEmpty(listing.District) || listing.District == "Unknown") && !string.IsNullOrEmpty(listing.Location))
+            {
+                var (detected, isAuto) = await DetectDistrictByAddressAsync(listing.Location);
+                if (isAuto && detected != "Unknown")
+                {
+                    listing.District = detected;
+                    listing.IsDistrictAutoDetected = true;
+                    _logger.LogInformation("Район для {ListingId} определен по адресу: {District}", listing.Id, detected);
+                    
                     _ctx.Listings.Update(listing);
                     await _ctx.SaveChangesAsync();
                 }
@@ -504,11 +531,21 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     private (double Score, string Rationale) CalculateLocationScore(string district)
     {
-        if (string.IsNullOrEmpty(district) || district == "Unknown")
+        if (string.IsNullOrEmpty(district) || district == "Unknown" || district.Trim().Equals("Unknown", StringComparison.OrdinalIgnoreCase))
             return (50, "Район не указан (нейтрально).");
 
-        var rating = _districtRatings.GetValueOrDefault(district, 5.0);
-        return (Math.Round(rating * 10, 2), $"Базовый рейтинг района '{district}': {rating}/10.");
+        var d = district.Trim();
+        // Пытаемся найти без учета регистра
+        var key = _districtRatings.Keys.FirstOrDefault(k => k.Equals(d, StringComparison.OrdinalIgnoreCase));
+        
+        if (key != null)
+        {
+            var rating = _districtRatings[key];
+            return (Math.Round(rating * 10, 2), $"Базовый рейтинг района '{key}': {rating}/10.");
+        }
+
+        _logger.LogWarning("Район '{District}' не найден в справочнике рейтингов", d);
+        return (50, $"Район '{d}' не найден в справочнике.");
     }
 
     /// <summary>
@@ -634,7 +671,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         if (score.PriceAttractiveness > 70)
             reasons.Add($"Цена на {Math.Round(100 - score.PriceAttractiveness)}% ниже рынка");
 
-        if (score.LocationScore > 75)
+        if (score.LocationScore >= 75)
             reasons.Add("Отличная локация");
 
         if (score.GrowthPotential > 70)
@@ -698,7 +735,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             return (nearest.District, true);
         }
 
-        // 2. OSM Nominatim API Fallback
+        // 2. OSM Nominatim API Fallback (Reverse Geocoding)
         try
         {
             var client = _httpClientFactory.CreateClient("Nominatim");
@@ -708,26 +745,52 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             var districtNode = response?["address"]?["city_district"] ?? response?["address"]?["suburb"];
             if (districtNode != null)
             {
-                var rawDistrict = districtNode.ToString();
-                var mapping = new Dictionary<string, string> {
-                    {"Центральны раён", "Центральный"}, {"Центральный район", "Центральный"},
-                    {"Савецкі раён", "Советский"}, {"Советский район", "Советский"},
-                    {"Першамайскі раён", "Первомайский"}, {"Первомайский район", "Первомайский"},
-                    {"Партызанскі раён", "Партизанский"}, {"Партизанский район", "Партизанский"},
-                    {"Заводскі раён", "Заводской"}, {"Заводской район", "Заводской"},
-                    {"Ленінскі раён", "Ленинский"}, {"Ленинский район", "Ленинский"},
-                    {"Кастрычніцкі раён", "Октябрьский"}, {"Октябрьский район", "Октябрьский"},
-                    {"Маскоўскі раён", "Московский"}, {"Московский район", "Московский"},
-                    {"Фрунзенскі раён", "Фрунзенский"}, {"Фрунзенский район", "Фрунзенский"}
-                };
-
-                if (mapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
-                return (rawDistrict.Replace(" район", ""), true);
+                var rawDistrict = districtNode.ToString().Trim();
+                if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
+                
+                var cleaned = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
+                return (cleaned, true);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Ошибка получения данных из OSM Nominatim");
+            _logger.LogWarning(ex, "Ошибка обратного геокодинга через OSM Nominatim");
+        }
+
+        return ("Unknown", false);
+    }
+
+    /// <summary>
+    /// Определение района по адресу (Geocoding)
+    /// </summary>
+    private async Task<(string District, bool IsAuto)> DetectDistrictByAddressAsync(string address)
+    {
+        try
+        {
+            var client = _httpClientFactory.CreateClient("Nominatim");
+            // Добавляем "Минск" к запросу для точности
+            var query = Uri.EscapeDataString($"{address}, Минск");
+            var url = $"https://nominatim.openstreetmap.org/search?q={query}&format=json&addressdetails=1&limit=1&accept-language=ru";
+            
+            var results = await client.GetFromJsonAsync<System.Text.Json.Nodes.JsonArray>(url);
+            if (results != null && results.Count > 0)
+            {
+                var addressNode = results[0]?["address"];
+                var districtNode = addressNode?["city_district"] ?? addressNode?["suburb"];
+                
+                if (districtNode != null)
+                {
+                    var rawDistrict = districtNode.ToString().Trim();
+                    if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
+                    
+                    var cleaned = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
+                    return (cleaned, true);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Ошибка прямого геокодинга через OSM Nominatim для адреса: {Address}", address);
         }
 
         return ("Unknown", false);

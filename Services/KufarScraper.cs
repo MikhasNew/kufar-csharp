@@ -264,12 +264,14 @@ public class KufarScraper
 
             var priceUsd = (int)(priceCents / 100);
 
-            // ad_parameters → Площадь и другие параметры
+            // ad_parameters → Площадь, координаты и другие параметры
             var area = 0.0;
             var rooms = 1;
             var floor = "";
             var floors = "";
             var yearBuilt = "";
+            double? lat = null;
+            double? lon = null;
 
             if (ad.TryGetProperty("ad_parameters", out var adParams))
             {
@@ -289,15 +291,29 @@ public class KufarScraper
                     }
                     else if (p == "floor" && param.TryGetProperty("v", out var vFloorProp))
                     {
+                        // Новый API: floor может быть массивом [3]
                         floor = GetValueAsString(vFloorProp);
                     }
-                    else if (p == "floors" && param.TryGetProperty("v", out var vFloorsProp))
+                    else if (p == "re_number_floors" && param.TryGetProperty("v", out var vFloorsProp))
                     {
+                        // Новый API: re_number_floors вместо floors (может быть массивом)
                         floors = GetValueAsString(vFloorsProp);
                     }
-                    else if (p == "build_year" && param.TryGetProperty("v", out var vYearProp))
+                    else if (p == "year_built" && param.TryGetProperty("v", out var vYearProp))
                     {
+                        // Новый API: year_built вместо build_year
                         yearBuilt = GetValueAsString(vYearProp);
+                    }
+                    else if (p == "coordinates" && param.TryGetProperty("v", out var coordsProp) && coordsProp.ValueKind == JsonValueKind.Array)
+                    {
+                        // Координаты теперь в ad_parameters: [lon, lat]
+                        var coords = coordsProp.EnumerateArray().ToList();
+                        if (coords.Count >= 2)
+                        {
+                            lon = coords[0].GetDouble();
+                            lat = coords[1].GetDouble();
+                            _logger.LogDebug("Извлечены координаты: lat={Lat}, lon={Lon}", lat, lon);
+                        }
                     }
                     // Пропускаем параметры с массивами (metro и т.д.)
                 }
@@ -323,10 +339,8 @@ public class KufarScraper
                 }
             }
 
-            // account_parameters → Локация/адрес и Координаты
+            // account_parameters → Локация/адрес
             var location = "";
-            double? lat = null;
-            double? lon = null;
             if (ad.TryGetProperty("account_parameters", out var accountParams))
             {
                 foreach (var param in accountParams.EnumerateArray())
@@ -335,15 +349,6 @@ public class KufarScraper
                     if (p == "address" && param.TryGetProperty("v", out var vProp))
                     {
                         location = GetValueAsString(vProp);
-                    }
-                    else if (p == "coordinates" && param.TryGetProperty("v", out var coordsProp) && coordsProp.ValueKind == JsonValueKind.Array)
-                    {
-                        var coords = coordsProp.EnumerateArray().ToList();
-                        if (coords.Count == 2)
-                        {
-                            lon = coords[0].GetDouble();
-                            lat = coords[1].GetDouble();
-                        }
                     }
                 }
             }
