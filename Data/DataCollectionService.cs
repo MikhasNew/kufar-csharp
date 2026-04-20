@@ -80,21 +80,25 @@ public class DataCollectionService : BackgroundService
             int totalUpdated = 0;
             bool hasNewListings = false;
 
-            await foreach (var pageListings in scraper.ScrapeEnumerableAsync(maxPages))
+            foreach (var category in new[] { "Квартира", "Дом" })
             {
-                totalReceived += pageListings.Count;
-                _logger.LogDebug("Обработка страницы: {Count} объявлений", pageListings.Count);
-
-                var (newCount, updatedCount, savedListings) = await listingService.SaveListingsAsync(pageListings);
-                totalSaved += newCount;
-                totalUpdated += updatedCount;
-
-                if (newCount > 0) hasNewListings = true;
-
-                // Рассчитываем скоринги только для сохранённых объявлений этой страницы
-                if (savedListings.Count > 0)
+                _logger.LogInformation("Запуск сбора для категории: {Category}", category);
+                await foreach (var pageListings in scraper.ScrapeEnumerableAsync(maxPages, category))
                 {
-                    await investmentAnalyzer.UpsertScoresAsync(savedListings);
+                    totalReceived += pageListings.Count;
+                    _logger.LogDebug("Обработка страницы: {Count} объявлений", pageListings.Count);
+
+                    var (newCount, updatedCount, savedListings) = await listingService.SaveListingsAsync(pageListings);
+                    totalSaved += newCount;
+                    totalUpdated += updatedCount;
+
+                    if (newCount > 0) hasNewListings = true;
+
+                    // Рассчитываем скоринги только для сохранённых объявлений этой страницы
+                    if (savedListings.Count > 0)
+                    {
+                        await investmentAnalyzer.UpsertScoresAsync(savedListings);
+                    }
                 }
             }
 

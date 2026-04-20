@@ -19,6 +19,10 @@ public class Listing
     public bool IsInteresting { get; set; }
     public string? Notes { get; set; }
     public bool IsDistrictAutoDetected { get; set; } // [NEW] Флаг OSM/БД детекции
+    public string Category { get; set; } = "Квартира";
+    public double? LotSize { get; set; }
+    public string? WallMaterial { get; set; }
+    public double? DistanceToMinsk { get; set; }
 
     // Новые поля для аналитики
     public string? ImageUrl { get; set; }

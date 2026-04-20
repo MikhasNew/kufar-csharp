@@ -11,6 +11,12 @@
     <h1>Объявления</h1>
     <div class="search-bar">
         <div class="filter-group">
+            <select class="form-select custom-select" @bind="filter.Category">
+                <option value="">Все</option>
+                <option value="Квартира">Квартиры</option>
+                <option value="Дом">Дома</option>
+            </select>
+
             <select class="form-select custom-select" @bind="filter.District">
                 <option value="">Все районы</option>
                 @foreach (var d in districts)
@@ -31,6 +37,12 @@
                 <input type="number" class="form-control" placeholder="От $" @bind="filter.MinPrice">
                 <span class="range-dash">—</span>
                 <input type="number" class="form-control" placeholder="До $" @bind="filter.MaxPrice">
+            </div>
+
+            <div class="distance-filter">
+                <label>До Минска:</label>
+                <input type="range" class="form-range" min="0" max="150" @bind="filter.MaxDistanceToMinsk">
+                <span class="distance-value">@(filter.MaxDistanceToMinsk?.ToString("N0") ?? "∞") км</span>
             </div>
 
             <button class="btn btn-primary search-btn" @onclick="ApplyFilter">
@@ -62,6 +74,14 @@
                                 <span class="badge-custom district">@item.District</span>
                                 <span class="badge-custom rooms">@item.Rooms ком.</span>
                                 <span class="badge-custom area">@item.Area м²</span>
+                                @if ((item.Category == "Дом" || item.Category == "Дача") && item.LotSize.HasValue)
+                                {
+                                    <span class="badge-custom lot">🌳 @item.LotSize сот.</span>
+                                }
+                                @if (item.DistanceToMinsk.HasValue)
+                                {
+                                    <span class="badge-custom distance">@item.DistanceToMinsk км</span>
+                                }
                             </div>
                         </div>
                         <p class="card-location"><i class="bi bi-geo-alt"></i> @item.Location</p>
@@ -279,6 +299,34 @@
 .badge-custom.district { background: #faf5ff; color: #6b21a8; }
 .badge-custom.rooms { background: #f0fdf4; color: #166534; }
 .badge-custom.area { background: #fff7ed; color: #9a3412; }
+.badge-custom.lot { background: #f0fdf4; color: #166534; }
+.badge-custom.distance { background: #faf5ff; color: #6b21a8; }
+
+.distance-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #f8fafc;
+    padding: 4px 12px;
+    border-radius: 10px;
+    border: 1px solid #e2e8f0;
+}
+
+.distance-filter label {
+    font-size: 0.85rem;
+    color: #64748b;
+    white-space: nowrap;
+}
+
+.distance-filter input[type="range"] {
+    width: 100px;
+}
+
+.distance-value {
+    font-weight: 600;
+    font-size: 0.9rem;
+    min-width: 50px;
+}
 
 .card-location {
     color: #64748b;

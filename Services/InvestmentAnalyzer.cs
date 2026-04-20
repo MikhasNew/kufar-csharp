@@ -505,21 +505,22 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     private async Task<(double Score, string Rationale)> CalculatePriceAttractivenessAsync(Listing listing)
     {
-        const double RadiusKm = 1.0;
+        var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
+        var radiusKm = isHouse ? 5.0 : 1.0;
         const double AreaTolerancePercent = 0.20; // ±20% по площади считается "аналог"
 
         double radiusAvg = 0;
         int nearbyCount = 0;
 
-        // === Гео-поиск аналогов в радиусе 1 км (если есть координаты) ===
+        // === Гео-поиск аналогов в радиусе (1 км для квартир, 5 км для домов) ===
         if (listing.Latitude.HasValue && listing.Longitude.HasValue)
         {
             var lat = listing.Latitude.Value;
             var lon = listing.Longitude.Value;
 
             // Bounding Box для быстрой предварительной фильтрации в SQLite
-            var latDiff = RadiusKm / 111.0;
-            var lonDiff = RadiusKm / (111.0 * Math.Cos(ToRadians(lat)));
+            var latDiff = radiusKm / 111.0;
+            var lonDiff = radiusKm / (111.0 * Math.Cos(ToRadians(lat)));
             var minLat = lat - latDiff;
             var maxLat = lat + latDiff;
             var minLon = lon - lonDiff;
@@ -535,12 +536,13 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
                     && l.Latitude.HasValue && l.Longitude.HasValue
                     && l.Latitude >= minLat && l.Latitude <= maxLat
                     && l.Longitude >= minLon && l.Longitude <= maxLon
-                    && l.Area >= minArea && l.Area <= maxArea)
+                    && l.Area >= minArea && l.Area <= maxArea
+                    && l.Category == listing.Category)
                 .ToListAsync();
 
             // Точный фильтр по расстоянию (Гаверсинус)
             var nearby = candidates
-                .Where(c => CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value) <= RadiusKm)
+                .Where(c => CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value) <= radiusKm)
                 .ToList();
 
             nearbyCount = nearby.Count;
@@ -760,6 +762,19 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             else if (listing.YearBuilt >= 2000)
             {
                 score += 5; rationale.Add("+5 (Дом >=2000)");
+            }
+        }
+
+        if (listing.Category == "Дом" || listing.Category == "Дача")
+        {
+            if (listing.LotSize.HasValue && listing.LotSize > 6)
+            {
+                score += 10; rationale.Add("+10 (Участок >6 сот.)");
+            }
+            if (!string.IsNullOrEmpty(listing.WallMaterial) && 
+                listing.WallMaterial.Contains("кирпич", StringComparison.OrdinalIgnoreCase))
+            {
+                score += 10; rationale.Add("+10 (Кирпич)");
             }
         }
 

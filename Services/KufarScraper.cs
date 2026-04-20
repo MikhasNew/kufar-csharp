@@ -10,6 +10,7 @@ public class KufarScraper
     private readonly HttpClient _http;
     private readonly ILogger<KufarScraper> _logger;
     private readonly MinskGeoService _geo;
+    private string _currentCategory = "Квартира";
     private readonly int _maxRetries = 3;
     private readonly int _retryDelayMs = 2000;
     private readonly int _pageDelayMs;
@@ -52,16 +53,22 @@ public class KufarScraper
     /// это список объявлений с одной загруженной страницы. Позволяет обрабатывать
     /// данные по мере поступления, не дожидаясь загрузки всех страниц.
     /// </summary>
-    public async IAsyncEnumerable<List<Listing>> ScrapeEnumerableAsync(int maxPages = 2)
+    public async IAsyncEnumerable<List<Listing>> ScrapeEnumerableAsync(int maxPages = 2, string category = "Квартира")
     {
-        _logger.LogInformation("Начат потоковый скрапинг Kufar, макс. страниц: {MaxPages}", maxPages);
+        var cat = category == "Дом" ? "1020" : "1010";
+        var rgnValues = new[] { "7", "2" };
 
-        string? currentCursor = null;
-        int totalPagesLoaded = 0;
+        _logger.LogInformation("Начат потоковый скрапинг Kufar, макс. страниц: {MaxPages}, категория: {Category}", maxPages, category);
+        _currentCategory = category;
 
-        for (int page = 1; page <= maxPages; page++)
+        foreach (var rgn in rgnValues)
         {
-            var url = BuildApiUrl(currentCursor);
+            string? currentCursor = null;
+            int totalPagesLoaded = 0;
+
+            for (int page = 1; page <= maxPages; page++)
+            {
+                var url = BuildApiUrl(currentCursor, cat, rgn);
             List<Listing>? pageListings = null;
             bool shouldBreak = false;
 
@@ -177,15 +184,16 @@ public class KufarScraper
         }
 
         _logger.LogInformation("Потоковый скрапинг завершен, загружено страниц: {Pages}", totalPagesLoaded);
+        }
     }
 
     /// <summary>
     /// Формирует URL запроса к новому API Kufar
     /// </summary>
-    private string BuildApiUrl(string? cursor)
+    private string BuildApiUrl(string? cursor, string cat, string rgn)
     {
         var size = 50;
-        var url = $"{ApiBaseUrl}?cat=1010&cur=USD&gtsy=country-belarus~province-minsk&lang=ru&size={size}&typ=sell&sort=lst.d";
+        var url = $"{ApiBaseUrl}?cat={cat}&rgn={rgn}&cur=USD&gtsy=country-belarus&lang=ru&size={size}&typ=sell&sort=lst.d";
         
         if (!string.IsNullOrEmpty(cursor))
         {
@@ -274,6 +282,8 @@ public class KufarScraper
             var yearBuilt = "";
             double? lat = null;
             double? lon = null;
+            double? lotSize = null;
+            string? wallMaterial = null;
 
             if (ad.TryGetProperty("ad_parameters", out var adParams))
             {
@@ -316,6 +326,16 @@ public class KufarScraper
                             lat = coords[1].GetDouble();
                             _logger.LogDebug("Извлечены координаты: lat={Lat}, lon={Lon}", lat, lon);
                         }
+                    }
+                    else if (p == "area_land" && param.TryGetProperty("v", out var vLotProp))
+                    {
+                        var lotStr = GetValueAsString(vLotProp);
+                        double.TryParse(lotStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsedLot);
+                        lotSize = parsedLot > 0 ? parsedLot : null;
+                    }
+                    else if (p == "material" && param.TryGetProperty("v", out var vMaterialProp))
+                    {
+                        wallMaterial = GetValueAsString(vMaterialProp);
                     }
                     // Пропускаем параметры с массивами (metro и т.д.)
                 }
@@ -388,6 +408,9 @@ public class KufarScraper
                 TotalFloors = parsedFloors > 0 ? parsedFloors : null,
                 Latitude = lat,
                 Longitude = lon,
+                LotSize = lotSize,
+                WallMaterial = wallMaterial,
+                DistanceToMinsk = (lat.HasValue && lon.HasValue) ? Math.Round(_geo.GetDistanceToMinskCenter(lat.Value, lon.Value), 1) : null,
                 ImageUrl = string.IsNullOrEmpty(imageUrl) ? null : imageUrl,
                 District = ExtractDistrict(location, title, description),
                 FlatType = GetFlatType(title, description),
@@ -395,6 +418,7 @@ public class KufarScraper
                 Url = url,
                 CreatedAt = created,
                 ScrapedAt = DateTime.UtcNow.ToString("o"),
+                Category = _currentCategory,
                 IsInteresting = false
             };
         }

@@ -107,6 +107,10 @@ public class ListingService
                 query = query.Where(l => l.PriceUsd <= filter.MaxPrice);
             if (filter.InterestingOnly)
                 query = query.Where(l => l.IsInteresting);
+            if (!string.IsNullOrEmpty(filter.Category) && filter.Category != "Все")
+                query = query.Where(l => l.Category == filter.Category);
+            if (filter.MaxDistanceToMinsk.HasValue)
+                query = query.Where(l => l.DistanceToMinsk != null && l.DistanceToMinsk <= filter.MaxDistanceToMinsk);
         }
 
         var totalCount = await query.CountAsync();
@@ -195,6 +199,8 @@ public class ListingFilter
     public int MinPrice { get; set; }
     public int MaxPrice { get; set; }
     public bool InterestingOnly { get; set; }
+    public string? Category { get; set; }
+    public double? MaxDistanceToMinsk { get; set; }
     public int Page { get; set; } = 1;
     public int PageSize { get; set; } = 20;
 }

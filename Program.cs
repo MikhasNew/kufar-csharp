@@ -44,6 +44,10 @@ using (var scope = app.Services.CreateScope())
     try { db.Database.ExecuteSqlRaw("ALTER TABLE InvestmentScores ADD COLUMN GrowthRationale TEXT DEFAULT ''"); } catch {}
     try { db.Database.ExecuteSqlRaw("ALTER TABLE InvestmentScores ADD COLUMN LiquidityRationale TEXT DEFAULT ''"); } catch {}
     try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN IsDistrictAutoDetected INTEGER DEFAULT 0"); } catch {}
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN Category TEXT DEFAULT 'Квартира'"); } catch {}
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN LotSize REAL"); } catch {}
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN WallMaterial TEXT"); } catch {}
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN DistanceToMinsk REAL"); } catch {}
 }
 
 app.UseStaticFiles();
@@ -70,17 +74,20 @@ app.MapPost("/api/scrape", async (KufarScraper scraper, ListingService listingSe
         int totalUpdated = 0;
 
         // Потоковая обработка: каждая страница сохраняется сразу после загрузки
-        await foreach (var pageListings in scraper.ScrapeEnumerableAsync(maxPages))
+        foreach (var category in new[] { "Квартира", "Дом" })
         {
-            totalReceived += pageListings.Count;
-            var (newCount, updatedCount, savedListings) = await listingService.SaveListingsAsync(pageListings);
-            totalSaved += newCount;
-            totalUpdated += updatedCount;
-
-            // Рассчитываем скоринги только для сохранённых объявлений этой страницы
-            if (savedListings.Count > 0)
+            await foreach (var pageListings in scraper.ScrapeEnumerableAsync(maxPages, category))
             {
-                await analyzer.UpsertScoresAsync(savedListings);
+                totalReceived += pageListings.Count;
+                var (newCount, updatedCount, savedListings) = await listingService.SaveListingsAsync(pageListings);
+                totalSaved += newCount;
+                totalUpdated += updatedCount;
+
+                // Рассчитываем скоринги только для сохранённых объявлений этой страницы
+                if (savedListings.Count > 0)
+                {
+                    await analyzer.UpsertScoresAsync(savedListings);
+                }
             }
         }
 
