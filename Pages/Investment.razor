@@ -225,13 +225,16 @@
         // Загружаем топ инвестицийых возможностей
         topListings = await InvestmentAnalyzer.GetTopInvestmentOpportunitiesAsync(20);
         
-        // Получаем скоринги для отображения
+        // Получаем скоринги для отображения (из БД, без пересчета)
         topListingsWithScores = new();
         int counter = 1;
         foreach (var listing in topListings)
         {
-            var score = await InvestmentAnalyzer.CalculateScoreAsync(listing);
-            topListingsWithScores.Add((listing, score, counter++));
+            var score = await InvestmentAnalyzer.GetScoreForListingAsync(listing.Id);
+            if (score != null)
+            {
+                topListingsWithScores.Add((listing, score, counter++));
+            }
         }
 
         // Считаем недооцененные

@@ -9,6 +9,7 @@ namespace RealEstateMinsk.Services;
 public interface IInvestmentAnalyzer
 {
     Task<InvestmentScore> CalculateScoreAsync(Listing listing);
+    Task<InvestmentScore?> GetScoreForListingAsync(int listingId);
     Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20);
     Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30);
     Task<PriceForecast> ForecastPriceAsync(Listing listing, int monthsAhead = 6);
@@ -138,12 +139,21 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     }
 
     /// <summary>
+    /// Получить скоринг для конкретного объявления из БД (без пересчета)
+    /// </summary>
+    public async Task<InvestmentScore?> GetScoreForListingAsync(int listingId)
+    {
+        return await _ctx.InvestmentScores
+            .FirstOrDefaultAsync(s => s.ListingId == listingId);
+    }
+
+    /// <summary>
     /// Получить топ инвестиционных возможностей
     /// </summary>
     public async Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20)
     {
-        // Сначала пересчитаем скоринги для всех актуальных объявлений
-        await RecalculateAllScoresAsync();
+        // Не пересчитываем автоматически - предполагаем что скоринги уже есть
+        // Пересчитывать нужно вручную через кнопку на странице
 
         // Получаем топ-N по общему скорингу с рекомендацией "Buy"
         var topScores = await _ctx.InvestmentScores
@@ -180,26 +190,24 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15)
     {
-        var listings = await _ctx.Listings.ToListAsync();
+        var allListings = await _ctx.Listings.ToListAsync();
+        var districtAvgs = allListings
+            .Where(l => l.District != "Unknown" && !string.IsNullOrEmpty(l.District))
+            .GroupBy(l => l.District)
+            .ToDictionary(g => g.Key, g => g.Average(l => l.PricePerSqm));
+
         var undervalued = new List<Listing>();
 
-        foreach (var listing in listings)
+        foreach (var listing in allListings)
         {
-            var districtListings = await _ctx.Listings
-                .Where(l => l.District == listing.District && l.District != "Unknown")
-                .ToListAsync();
+            if (string.IsNullOrEmpty(listing.District) || listing.District == "Unknown") continue;
+            
+            if (!districtAvgs.TryGetValue(listing.District, out var districtAvg)) continue;
 
-            if (!districtListings.Any()) continue;
-
-            var districtAvg = districtListings.Average(l => l.PricePerSqm);
-
-            if (districtAvg > 0)
+            var deviation = (districtAvg - listing.PricePerSqm) / districtAvg * 100;
+            if (deviation >= thresholdPercent)
             {
-                var deviation = (districtAvg - listing.PricePerSqm) / districtAvg * 100;
-                if (deviation >= thresholdPercent)
-                {
-                    undervalued.Add(listing);
-                }
+                undervalued.Add(listing);
             }
         }
 
