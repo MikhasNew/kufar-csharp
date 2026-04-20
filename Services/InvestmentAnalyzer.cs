@@ -9,6 +9,7 @@ namespace RealEstateMinsk.Services;
 public interface IInvestmentAnalyzer
 {
     Task<InvestmentScore> CalculateScoreAsync(Listing listing);
+    Task<InvestmentScore> GetOrCalculateScoreAsync(Listing listing, bool forceRecalculate = false);
     Task<InvestmentScore?> GetScoreForListingAsync(int listingId);
     Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20);
     Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30);
@@ -136,6 +137,43 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         score.CalculatedAt = DateTime.UtcNow;
 
         return score;
+    }
+
+    /// <summary>
+    /// Получить скоринг из БД или рассчитать новый, если он отсутствует или устарел (> 24ч)
+    /// </summary>
+    public async Task<InvestmentScore> GetOrCalculateScoreAsync(Listing listing, bool forceRecalculate = false)
+    {
+        if (!forceRecalculate)
+        {
+            var cached = await _ctx.InvestmentScores.FirstOrDefaultAsync(s => s.ListingId == listing.Id);
+            if (cached != null && (DateTime.UtcNow - cached.CalculatedAt).TotalHours < 24)
+            {
+                return cached;
+            }
+        }
+
+        var newScore = await CalculateScoreAsync(listing);
+        await UpsertSingleScoreAsync(newScore);
+        return newScore;
+    }
+
+    private async Task UpsertSingleScoreAsync(InvestmentScore score)
+    {
+        var existing = await _ctx.InvestmentScores.FirstOrDefaultAsync(s => s.ListingId == score.ListingId);
+        if (existing != null)
+        {
+            // Устанавливаем ID из существующей записи, чтобы SetValues не пытался его изменить
+            score.Id = existing.Id;
+            _ctx.Entry(existing).CurrentValues.SetValues(score);
+            existing.CalculatedAt = DateTime.UtcNow;
+        }
+        else
+        {
+            await _ctx.InvestmentScores.AddAsync(score);
+        }
+
+        await _ctx.SaveChangesAsync();
     }
 
     /// <summary>

@@ -91,12 +91,18 @@
     private InvestmentScore? score;
     private PriceForecast? forecast;
     private bool showInfo = false;
+    private int lastProcessedId;
 
-    protected override async Task OnInitializedAsync()
+    protected override async Task OnParametersSetAsync()
     {
+        if (Listing == null || Listing.Id == lastProcessedId)
+            return;
+
+        lastProcessedId = Listing.Id;
+        
         try
         {
-            score = await InvestmentAnalyzer.CalculateScoreAsync(Listing);
+            score = await InvestmentAnalyzer.GetOrCalculateScoreAsync(Listing);
 
             if (ShowForecast)
             {
