@@ -11,11 +11,11 @@ public interface IInvestmentAnalyzer
     Task<InvestmentScore> CalculateScoreAsync(Listing listing);
     Task<InvestmentScore> GetOrCalculateScoreAsync(Listing listing, bool forceRecalculate = false);
     Task<InvestmentScore?> GetScoreForListingAsync(int listingId);
-    Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20);
-    Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30);
+    Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20, string? category = null);
+    Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30, string? category = null);
     Task<PriceForecast> ForecastPriceAsync(Listing listing, int monthsAhead = 6);
-    Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15);
-    Task<ComparativeAnalysis> CompareDistrictsAsync();
+    Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15, string? category = null);
+    Task<ComparativeAnalysis> CompareDistrictsAsync(string? category = null);
     Task RecalculateAllScoresAsync();
     Task UpsertScoresAsync(IEnumerable<Listing> listings);
 }
@@ -188,27 +188,26 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Получить топ инвестиционных возможностей
     /// </summary>
-    public async Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20)
+    public async Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20, string? category = null)
     {
-        // Не пересчитываем автоматически - предполагаем что скоринги уже есть
-        // Пересчитывать нужно вручную через кнопку на странице
+        var query = _ctx.InvestmentScores.Include(s => s.Listing).AsQueryable();
+        if (!string.IsNullOrEmpty(category) && category != "Все")
+        {
+            query = query.Where(s => s.Listing!.Category == category);
+        }
 
-        // Получаем топ-N по общему скорингу с рекомендацией "Buy"
-        var topScores = await _ctx.InvestmentScores
-            .Include(s => s.Listing)
+        var topScores = await query
             .Where(s => s.Recommendation == "Buy")
             .OrderByDescending(s => s.TotalScore)
             .Take(count)
             .ToListAsync();
 
-        // Если недостаточно "Buy", добавим лучшие "Hold"
         if (topScores.Count < count)
         {
             var remaining = count - topScores.Count;
             var topIds = topScores.Select(s => s.ListingId).ToHashSet();
 
-            var holdScores = await _ctx.InvestmentScores
-                .Include(s => s.Listing)
+            var holdScores = await query
                 .Where(s => s.Recommendation == "Hold" && !topIds.Contains(s.ListingId))
                 .OrderByDescending(s => s.TotalScore)
                 .Take(remaining)
@@ -226,9 +225,15 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Найти недооцененные объекты (цена ниже рынка на thresholdPercent%)
     /// </summary>
-    public async Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15)
+    public async Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15, string? category = null)
     {
-        var allListings = await _ctx.Listings.ToListAsync();
+        var query = _ctx.Listings.AsQueryable();
+        if (!string.IsNullOrEmpty(category) && category != "Все")
+        {
+            query = query.Where(l => l.Category == category);
+        }
+
+        var allListings = await query.ToListAsync();
         var districtAvgs = allListings
             .Where(l => l.District != "Unknown" && !string.IsNullOrEmpty(l.District))
             .GroupBy(l => l.District)
@@ -257,18 +262,21 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Получить тренд рынка по району или всему городу
     /// </summary>
-    public async Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30)
+    public async Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30, string? category = null)
     {
         var startDate = DateTime.UtcNow.AddDays(-daysBack);
         var startDateStr = startDate.ToString("o");
 
-        // Фильтрация по району
-        var allListings = _ctx.Listings.AsQueryable();
+        var query = _ctx.Listings.AsQueryable();
         if (!string.IsNullOrEmpty(district))
         {
-            allListings = allListings.Where(l => l.District == district);
+            query = query.Where(l => l.District == district);
         }
-        var listingIds = await allListings.Select(l => l.Id).ToListAsync();
+        if (!string.IsNullOrEmpty(category) && category != "Все")
+        {
+            query = query.Where(l => l.Category == category);
+        }
+        var listingIds = await query.Select(l => l.Id).ToListAsync();
 
         // Все записи истории цен для нужных объявлений
         var allHistory = await _ctx.PriceHistories
@@ -291,7 +299,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         }).ToList();
 
         // Если нет исторических данных, используем текущие цены из Listings
-        var currentListings = await allListings.ToListAsync();
+        var currentListings = await query.ToListAsync();
         var currentAvg = currentListings.Any() ? currentListings.Average(l => l.PricePerSqm) : 0;
         var previousAvg = olderHistory.Any()
             ? olderHistory.Average(h => h.PricePerSqm)
@@ -328,7 +336,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<PriceForecast> ForecastPriceAsync(Listing listing, int monthsAhead = 6)
     {
-        var trend = await GetMarketTrendAsync(listing.District, 30);
+        var trend = await GetMarketTrendAsync(listing.District, 30, listing.Category);
 
         var monthlyChange = trend.ChangePercent / 30 * 30; // Месячное изменение
         var projectedChange = monthlyChange * monthsAhead;
@@ -353,9 +361,15 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Сравнительный анализ районов
     /// </summary>
-    public async Task<ComparativeAnalysis> CompareDistrictsAsync()
+    public async Task<ComparativeAnalysis> CompareDistrictsAsync(string? category = null)
     {
-        var districts = await _ctx.Listings
+        var query = _ctx.Listings.AsQueryable();
+        if (!string.IsNullOrEmpty(category) && category != "Все")
+        {
+            query = query.Where(l => l.Category == category);
+        }
+
+        var districts = await query
             .Where(l => l.District != "Unknown")
             .GroupBy(l => l.District)
             .Select(g => new
@@ -370,9 +384,9 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
 
         foreach (var d in districts)
         {
-            var trend = await GetMarketTrendAsync(d.District, 30);
+            var trend = await GetMarketTrendAsync(d.District, 30, category);
             var avgScore = await _ctx.InvestmentScores
-                .Where(s => s.Listing!.District == d.District)
+                .Where(s => s.Listing!.District == d.District && s.Listing!.Category == category)
                 .AverageAsync(s => (double?)s.TotalScore) ?? 0;
 
             // Investment Index = комбинация факторов
@@ -565,18 +579,18 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
 
         // === Средняя цена/м² по району (фоллбэк) ===
         var districtListings = await _ctx.Listings
-            .Where(l => l.District == listing.District && l.District != "Unknown")
+            .Where(l => l.District == listing.District && l.District != "Unknown" && l.Category == listing.Category)
             .ToListAsync();
         var districtAvg = districtListings.Any() ? districtListings.Average(l => l.PricePerSqm) : 0;
 
         // === Средняя цена/м² по типу квартиры ===
         var typeListings = await _ctx.Listings
-            .Where(l => l.FlatType == listing.FlatType && l.FlatType != "Другой")
+            .Where(l => l.FlatType == listing.FlatType && l.FlatType != "Другой" && l.Category == listing.Category)
             .ToListAsync();
         var typeAvg = typeListings.Any() ? typeListings.Average(l => l.PricePerSqm) : 0;
 
         // === Общая средняя ===
-        var allListings = await _ctx.Listings.ToListAsync();
+        var allListings = await _ctx.Listings.Where(l => l.Category == listing.Category).ToListAsync();
         var overallAvg = allListings.Any() ? allListings.Average(l => l.PricePerSqm) : 0;
 
         if (radiusAvg == 0 && districtAvg == 0 && typeAvg == 0 && overallAvg == 0)
@@ -660,7 +674,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     private async Task<(double Score, string Rationale)> CalculateGrowthPotentialAsync(Listing listing)
     {
-        var trend = await GetMarketTrendAsync(listing.District, 30);
+        var trend = await GetMarketTrendAsync(listing.District, 30, listing.Category);
         List<string> rationale = new() { $"Тренд: {trend.Trend} за 30 дней ({trend.ChangePercent}%)." };
 
         // Базовый скоринг на основе тренда

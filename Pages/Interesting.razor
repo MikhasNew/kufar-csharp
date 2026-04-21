@@ -6,6 +6,13 @@
 <PageTitle>Избранное</PageTitle>
 
 <h4>Избранные объявления</h4>
+<div class="mb-3">
+    <select class="form-select" style="width: auto;" @bind="selectedCategory" @bind:after="LoadData">
+        <option value="">Все</option>
+        <option value="Квартира">Квартиры</option>
+        <option value="Дом">Дома</option>
+    </select>
+</div>
 @if (listings.Count == 0)
 {
     <p class="text-muted">Нет избранных объявлений</p>
@@ -32,10 +39,21 @@
 
 @code {
     private List<Listing> listings = new();
+    private string selectedCategory = "";
+
+    private async Task LoadData()
+    {
+        var filter = new ListingFilter { InterestingOnly = true, PageSize = 1000 };
+        if (!string.IsNullOrEmpty(selectedCategory) && selectedCategory != "Все")
+        {
+            filter.Category = selectedCategory;
+        }
+        var result = await ListingService.GetListingsAsync(filter);
+        listings = result.Items;
+    }
 
     protected override async Task OnInitializedAsync()
     {
-        var result = await ListingService.GetListingsAsync(new ListingFilter { InterestingOnly = true, PageSize = 1000 });
-        listings = result.Items;
+        await LoadData();
     }
 }

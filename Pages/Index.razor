@@ -38,6 +38,11 @@
         {
             <span class="ms-2 badge bg-success">@statusMessage</span>
         }
+        <select class="form-select form-select-sm" style="width: auto;" @bind="selectedCategory" @bind:after="LoadData">
+            <option value="">Все</option>
+            <option value="Квартира">Квартиры</option>
+            <option value="Дом">Дома</option>
+        </select>
     </div>
 </div>
 
@@ -115,6 +120,7 @@
     private bool isLoading = false;
     private string statusMessage = "";
     private int maxPages = 5;
+    private string selectedCategory = "";
 
     protected override async Task OnInitializedAsync()
     {
@@ -124,7 +130,7 @@
 
     private async Task LoadData()
     {
-        stats = await ListingService.GetStatsAsync();
+        stats = await ListingService.GetStatsAsync(selectedCategory == "Все" ? null : selectedCategory);
         var result = await ListingService.GetListingsAsync(new ListingFilter { PageSize = 6 });
         recentListings = result.Items;
     }
@@ -138,11 +144,14 @@
             int totalReceived = 0;
             int totalSaved = 0;
 
-            await foreach (var pageListings in Scraper.ScrapeEnumerableAsync(maxPages))
+            foreach (var category in new[] { "Квартира", "Дом" })
             {
-                totalReceived += pageListings.Count;
-                var (newCount, updatedCount, savedListings) = await ListingService.SaveListingsAsync(pageListings);
-                totalSaved += newCount;
+                await foreach (var pageListings in Scraper.ScrapeEnumerableAsync(maxPages, category))
+                {
+                    totalReceived += pageListings.Count;
+                    var (newCount, updatedCount, savedListings) = await ListingService.SaveListingsAsync(pageListings);
+                    totalSaved += newCount;
+                }
             }
 
             statusMessage = $"Получено {totalReceived}, сохранено {totalSaved}";

@@ -7,6 +7,13 @@
 <PageTitle>Статистика</PageTitle>
 
 <h4>Статистика рынка</h4>
+<div class="mb-3">
+    <select class="form-select" style="width: auto;" @bind="selectedCategory" @bind:after="LoadData">
+        <option value="">Все</option>
+        <option value="Квартира">Квартиры</option>
+        <option value="Дом">Дома</option>
+    </select>
+</div>
 <div class="row">
     <div class="col-md-4">
         <div class="chart-container">
@@ -30,9 +37,15 @@
 
 @code {
     private MarketStats stats = new();
+    private string selectedCategory = "";
+
+    private async Task LoadData()
+    {
+        stats = await ListingService.GetStatsAsync(selectedCategory == "Все" ? null : selectedCategory);
+    }
 
     protected override async Task OnInitializedAsync()
     {
-        stats = await ListingService.GetStatsAsync();
+        await LoadData();
     }
 }

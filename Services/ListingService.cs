@@ -132,9 +132,15 @@ public class ListingService
         };
     }
 
-    public async Task<MarketStats> GetStatsAsync()
+    public async Task<MarketStats> GetStatsAsync(string? category = null)
     {
-        var count = await _ctx.Listings.CountAsync();
+        var query = _ctx.Listings.AsQueryable();
+        if (!string.IsNullOrEmpty(category) && category != "Все")
+        {
+            query = query.Where(l => l.Category == category);
+        }
+
+        var count = await query.CountAsync();
         if (count == 0)
         {
             return new MarketStats();
@@ -143,21 +149,21 @@ public class ListingService
         var stats = new MarketStats
         {
             TotalListings = count,
-            AvgPriceSqm = Math.Round(await _ctx.Listings.AverageAsync(l => l.PricePerSqm), 2),
-            AvgPrice = Math.Round(await _ctx.Listings.AverageAsync(l => l.PriceUsd), 0)
+            AvgPriceSqm = Math.Round(await query.AverageAsync(l => l.PricePerSqm), 2),
+            AvgPrice = Math.Round(await query.AverageAsync(l => l.PriceUsd), 0)
         };
 
-        stats.ByDistrict = await _ctx.Listings
+        stats.ByDistrict = await query
             .GroupBy(l => l.District)
             .Select(g => new StatsItem { Key = g.Key, Count = g.Count(), AvgPrice = Math.Round(g.Average(l => l.PricePerSqm), 2) })
             .OrderByDescending(x => x.Count).ToListAsync();
 
-        stats.ByType = await _ctx.Listings
+        stats.ByType = await query
             .GroupBy(l => l.FlatType)
             .Select(g => new StatsItem { Key = g.Key, Count = g.Count(), AvgPrice = Math.Round(g.Average(l => l.PricePerSqm), 2) })
             .OrderByDescending(x => x.Count).ToListAsync();
 
-        stats.ByRooms = await _ctx.Listings
+        stats.ByRooms = await query
             .GroupBy(l => l.Rooms)
             .Select(g => new StatsItem { Key = g.Key.ToString(), Count = g.Count(), AvgPrice = Math.Round(g.Average(l => l.PricePerSqm), 2) })
             .OrderBy(x => x.Key).ToListAsync();

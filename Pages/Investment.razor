@@ -8,6 +8,13 @@
 <PageTitle>Инвестиционный Анализ</PageTitle>
 
 <h4><i class="bi bi-graph-up-arrow"></i> Инвестиционный Анализ</h4>
+<div class="mb-3">
+    <select class="form-select" style="width: auto;" @bind="selectedCategory" @bind:after="LoadAnalysisData">
+        <option value="">Все</option>
+        <option value="Квартира">Квартиры</option>
+        <option value="Дом">Дома</option>
+    </select>
+</div>
 
 <!-- Summary Cards -->
 <div class="row mb-4">
@@ -283,6 +290,7 @@
     private string lastCalculationTime = "Не производился";
     private int undervaluedCount = 0;
     private HashSet<int> expandedListingIds = new();
+    private string selectedCategory = "";
 
     protected override async Task OnInitializedAsync()
     {
@@ -291,11 +299,9 @@
 
     private async Task LoadAnalysisData()
     {
-        // Загружаем сравнительный анализ районов
-        comparativeAnalysis = await InvestmentAnalyzer.CompareDistrictsAsync();
-        
-        // Загружаем топ инвестицийых возможностей
-        topListings = await InvestmentAnalyzer.GetTopInvestmentOpportunitiesAsync(20);
+        var category = selectedCategory == "Все" ? null : selectedCategory;
+        comparativeAnalysis = await InvestmentAnalyzer.CompareDistrictsAsync(category);
+        topListings = await InvestmentAnalyzer.GetTopInvestmentOpportunitiesAsync(20, category);
         
         // Получаем скоринги для отображения (из БД, без пересчета)
         topListingsWithScores = new();
@@ -310,7 +316,7 @@
         }
 
         // Считаем недооцененные
-        undervaluedListings = await InvestmentAnalyzer.FindUndervaluedAsync(15);
+        undervaluedListings = await InvestmentAnalyzer.FindUndervaluedAsync(15, category);
         undervaluedCount = undervaluedListings.Count;
     }
 

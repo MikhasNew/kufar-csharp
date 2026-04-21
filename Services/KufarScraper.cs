@@ -291,7 +291,7 @@ public class KufarScraper
                 {
                     var p = param.TryGetProperty("p", out var pProp) ? pProp.GetString() : "";
 
-                    if (p == "size" && param.TryGetProperty("v", out var vProp))
+                    if ((p == "size" || p == "size_total") && param.TryGetProperty("v", out var vProp))
                     {
                         var sizeStr = GetValueAsString(vProp);
                         double.TryParse(sizeStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out area);
@@ -327,7 +327,7 @@ public class KufarScraper
                             _logger.LogDebug("Извлечены координаты: lat={Lat}, lon={Lon}", lat, lon);
                         }
                     }
-                    else if (p == "area_land" && param.TryGetProperty("v", out var vLotProp))
+                    else if ((p == "area_land" || p == "size_area") && param.TryGetProperty("v", out var vLotProp))
                     {
                         var lotStr = GetValueAsString(vLotProp);
                         double.TryParse(lotStr.Replace(",", "."), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var parsedLot);
