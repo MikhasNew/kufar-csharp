@@ -49,6 +49,7 @@ using (var scope = app.Services.CreateScope())
     try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN WallMaterial TEXT"); } catch {}
     try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN DistanceToMinsk REAL"); } catch {}
     try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN PriceChangeUsd INTEGER DEFAULT 0"); } catch {}
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN IsInteresting INTEGER DEFAULT 0"); } catch {}
     
     // Инициализация новых полей для старых данных
     var listingService = scope.ServiceProvider.GetRequiredService<ListingService>();

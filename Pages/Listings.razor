@@ -52,6 +52,13 @@
                 </label>
             </div>
 
+            <div class="form-check form-switch ms-2 d-flex align-items-center">
+                <input class="form-check-input me-2" type="checkbox" id="interestingOnly" @bind="filter.InterestingOnly" style="cursor:pointer; width: 40px; height: 20px;">
+                <label class="form-check-label" for="interestingOnly" style="cursor:pointer; font-weight: 500; font-size: 0.9rem;">
+                    ⭐ Избранное
+                </label>
+            </div>
+
             <select class="form-select custom-select" @bind="filter.SortBy" style="min-width: 200px;">
                 <option value="newest">🕒 Новые объявления</option>
                 <option value="price_change_asc">📉 Сначала скидки</option>
@@ -207,9 +214,13 @@
 
     private async Task ToggleInteresting(int id)
     {
-        await ListingService.ToggleInterestingAsync(id);
         var item = result.Items.FirstOrDefault(l => l.Id == id);
-        if (item != null) item.IsInteresting = !item.IsInteresting;
+        if (item != null) 
+        {
+            item.IsInteresting = !item.IsInteresting;
+            StateHasChanged();
+        }
+        await ListingService.ToggleInterestingAsync(id);
     }
 }
 

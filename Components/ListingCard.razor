@@ -4,12 +4,26 @@
 @inject ListingService ListingService
 @inject NavigationManager Nav
 
-<div class="listing-card">
-    <div class="d-flex justify-content-between align-items-start">
-        <h6 class="mb-1 text-truncate" style="max-width: 70%;">@Listing.Title</h6>
-        <i class="bi bi-star-fill interesting-btn @(Listing.IsInteresting ? "active" : "")" 
-           @onclick="ToggleInteresting" style="cursor: pointer;"></i>
-    </div>
+<style>
+    .interesting-btn {
+        color: #ccd6dd;
+        transition: color 0.2s ease, transform 0.2s ease;
+        font-size: 1.2rem;
+    }
+    .interesting-btn:hover {
+        transform: scale(1.2);
+    }
+    .interesting-btn.active {
+        color: #ffac33;
+    }
+</style>
+
+    <div class="listing-card">
+        <div class="d-flex justify-content-between align-items-start">
+            <h6 class="mb-1 text-truncate" style="max-width: 70%;">@Listing.Title</h6>
+            <i class="bi @(Listing.IsInteresting ? "bi-star-fill active" : "bi-star") interesting-btn" 
+               @onclick="ToggleInteresting" style="cursor: pointer;"></i>
+        </div>
     <div class="d-flex align-items-center gap-2">
         <div class="price-tag">$@Listing.PriceUsd.ToString("N0")</div>
         @if (Listing.PriceHistories?.Count > 1)
@@ -52,10 +66,10 @@
 @code {
     [Parameter] public Listing Listing { get; set; } = null!;
 
-    async void ToggleInteresting()
+    async Task ToggleInteresting()
     {
-        await ListingService.ToggleInterestingAsync(Listing.Id);
         Listing.IsInteresting = !Listing.IsInteresting;
         StateHasChanged();
+        await ListingService.ToggleInterestingAsync(Listing.Id);
     }
 }
