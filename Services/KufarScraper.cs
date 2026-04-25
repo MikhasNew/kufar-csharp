@@ -117,8 +117,8 @@ public class KufarScraper
                         }
 
                         totalPagesLoaded++;
-                        _logger.LogInformation("Страница {Page}: получено {Count} объявлений из {TotalOnPage}",
-                            page, pageListings.Count, ads.GetArrayLength());
+                        _logger.LogInformation("Страница {Page} (rgn={Rgn}): получено {Count} объявлений из {TotalOnPage}",
+                            page, rgn, pageListings.Count, ads.GetArrayLength());
 
                         // Потоковый скрапинг: надежнее всего полагаться на наличие токена 'next' в пагинации,
                         // так как количество объявлений на странице может быть меньше 50 даже в середине списка.
@@ -144,20 +144,20 @@ public class KufarScraper
 
                         if (string.IsNullOrEmpty(currentCursor))
                         {
-                            _logger.LogInformation("Токен следующей страницы не найден. Завершаем скрапинг.");
+                            _logger.LogInformation("Токен следующей страницы не найден для rgn={Rgn}. Переходим к следующему региону.", rgn);
                             shouldBreak = true;
                         }
                     }
                     else
                     {
-                        _logger.LogWarning("Отсутствует поле 'ads' в ответе API на странице {Page}", page);
+                        _logger.LogWarning("Отсутствует поле 'ads' в ответе API на странице {Page} rgn={Rgn}", page, rgn);
                         shouldBreak = true;
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Ошибка при запросе страницы {Page}: {Message}", page, ex.Message);
+                _logger.LogError(ex, "Ошибка при запросе страницы {Page} rgn={Rgn}: {Message}", page, rgn, ex.Message);
                 shouldBreak = true;
             }
 
@@ -169,7 +169,8 @@ public class KufarScraper
 
             if (shouldBreak)
             {
-                yield break;
+                // ВАЖНО: break (а не yield break!) — чтобы продолжить скрапинг следующего региона
+                break;
             }
 
             if (page < maxPages)
@@ -263,6 +264,8 @@ public class KufarScraper
             }
 
             // price_usd → Цена (строка в центах, нужно разделить на 100)
+            // Если currency == BYR, то price_usd = 0 или содержит цену в BYR — пропускаем такие объявления
+            var currency = ad.TryGetProperty("currency", out var currProp) ? (currProp.GetString() ?? "USD") : "USD";
             var priceUsdCents = ad.TryGetProperty("price_usd", out var priceProp)
                 ? GetValueAsString(priceProp)
                 : "0";
@@ -273,6 +276,12 @@ public class KufarScraper
             }
 
             var priceUsd = (int)(priceCents / 100);
+            
+            // Пропускаем объявления с ценой в BYR (нет USD-цены) или нулевой ценой
+            if (currency == "BYR" || priceUsd == 0)
+            {
+                return null;
+            }
 
             // ad_parameters → Площадь, координаты и другие параметры
             var area = 0.0;
@@ -306,9 +315,9 @@ public class KufarScraper
                         // Новый API: floor может быть массивом [3]
                         floor = GetValueAsString(vFloorProp);
                     }
-                    else if (p == "re_number_floors" && param.TryGetProperty("v", out var vFloorsProp))
+                    else if ((p == "re_number_floors" || p == "house_number_floors") && param.TryGetProperty("v", out var vFloorsProp))
                     {
-                        // Новый API: re_number_floors вместо floors (может быть массивом)
+                        // Квартиры: re_number_floors; Дома: house_number_floors
                         floors = GetValueAsString(vFloorsProp);
                     }
                     else if (p == "year_built" && param.TryGetProperty("v", out var vYearProp))
