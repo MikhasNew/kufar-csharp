@@ -110,11 +110,17 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             }
         }
 
+        var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
+
         // 1. Price Attractiveness (35%)
         (score.PriceAttractiveness, score.PriceRationale) = await CalculatePriceAttractivenessAsync(listing);
 
         // 2. Location Score (25%)
-        (score.LocationScore, score.LocationRationale) = CalculateLocationScore(listing.District);
+        // Для домов — считаем по расстоянию до Минска, для квартир — по рейтингу района
+        if (isHouse && listing.DistanceToMinsk.HasValue)
+            (score.LocationScore, score.LocationRationale) = CalculateLocationScoreForHouse(listing.DistanceToMinsk.Value);
+        else
+            (score.LocationScore, score.LocationRationale) = CalculateLocationScore(listing.District);
 
         // 3. Growth Potential (25%)
         (score.GrowthPotential, score.GrowthRationale) = await CalculateGrowthPotentialAsync(listing);
@@ -605,12 +611,12 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             benchmark = radiusAvg;
             var minArea = Math.Round(listing.Area * 0.8, 1);
             var maxArea = Math.Round(listing.Area * 1.2, 1);
-            rationale = $"Найдено {nearbyCount} аналогов в радиусе 1км (площадь {minArea}-{maxArea} м²). Метод: Взвешенная средняя (IDW): {Math.Round(benchmark, 0)} $/м².";
+            rationale = $"Найдено {nearbyCount} аналогов в радиусе {radiusKm}км (площадь {minArea}-{maxArea} м²). Метод: Взвешенная средняя (IDW): {Math.Round(benchmark, 0)} $/м².";
         }
         else if (nearbyCount > 0)
         {
             benchmark = districtAvg > 0 ? districtAvg : (typeAvg > 0 ? typeAvg : overallAvg);
-            rationale = $"В радиусе 1км найдено лишь {nearbyCount} аналога (нужно 2 для IDW). Фоллбэк на " + 
+            rationale = $"В радиусе {radiusKm}км найдено лишь {nearbyCount} аналога (нужно 2 для IDW). Фоллбэк на " + 
                         (districtAvg > 0 ? $"район '{listing.District}'" : (typeAvg > 0 ? $"тип '{listing.FlatType}'" : "город")) + 
                         $": {Math.Round(benchmark, 0)} $/м².";
         }
@@ -648,7 +654,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     }
 
     /// <summary>
-    /// Расчет привлекательности локации (0-100)
+    /// Расчет привлекательности локации по РЕЙТИНГУ РАЙОНА (для квартир)
     /// </summary>
     private (double Score, string Rationale) CalculateLocationScore(string district)
     {
@@ -656,17 +662,60 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             return (50, "Район не указан (нейтрально).");
 
         var d = district.Trim();
-        // Пытаемся найти без учета регистра
         var key = _districtRatings.Keys.FirstOrDefault(k => k.Equals(d, StringComparison.OrdinalIgnoreCase));
         
         if (key != null)
         {
             var rating = _districtRatings[key];
-            return (Math.Round(rating * 10, 2), $"Базовый рейтинг района '{key}': {rating}/10.");
+            return (Math.Round(rating * 10, 2), $"Рейтинг района '{key}': {rating}/10.");
         }
 
         _logger.LogWarning("Район '{District}' не найден в справочнике рейтингов", d);
         return (50, $"Район '{d}' не найден в справочнике.");
+    }
+
+    /// <summary>
+    /// Расчет привлекательности локации по РАССТОЯНИЮ ДО МИНСКА (для домов)
+    /// Районный рейтинг для пригородных домов бессмысленен — важна дистанция.
+    /// </summary>
+    private static (double Score, string Rationale) CalculateLocationScoreForHouse(double distanceKm)
+    {
+        double score;
+        string label;
+
+        if (distanceKm <= 10)
+        {
+            score = 90 + (10 - distanceKm); // 90–100
+            label = "фактически в черте Минска (МКАД)";
+        }
+        else if (distanceKm <= 20)
+        {
+            score = 75 + (20 - distanceKm) * 1.5; // 75–90
+            label = "ближний пригород";
+        }
+        else if (distanceKm <= 35)
+        {
+            score = 55 + (35 - distanceKm) * 1.33; // 55–75
+            label = "популярный пригород";
+        }
+        else if (distanceKm <= 60)
+        {
+            score = 35 + (60 - distanceKm) * 0.8; // 35–55
+            label = "далёкий пригород";
+        }
+        else if (distanceKm <= 100)
+        {
+            score = 20 + (100 - distanceKm) * 0.375; // 20–35
+            label = "районный центр";
+        }
+        else
+        {
+            score = Math.Max(0, 20 - (distanceKm - 100) * 0.2); // 0–20
+            label = "глубокая провинция";
+        }
+
+        return (Math.Round(Math.Clamp(score, 0, 100), 1),
+            $"{Math.Round(distanceKm, 1)} км от Минска — {label}.");
     }
 
     /// <summary>
@@ -775,6 +824,28 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
                 else if (listing.LotSize < 4)
                 {
                     score -= 5; rationale.Add("-5 (Участок <4 сот.)");
+                }
+            }
+
+            // Расстояние до Минска (ликвидность: ближе — быстрее продать)
+            if (listing.DistanceToMinsk.HasValue)
+            {
+                var dist = listing.DistanceToMinsk.Value;
+                if (dist <= 20)
+                {
+                    score += 10; rationale.Add($"+10 ({dist:N0} км от Минска — высокая ликвидность)");
+                }
+                else if (dist <= 35)
+                {
+                    score += 5; rationale.Add($"+5 ({dist:N0} км от Минска)");
+                }
+                else if (dist > 120)
+                {
+                    score -= 15; rationale.Add($"-15 ({dist:N0} км от Минска — очень низкая ликвидность)");
+                }
+                else if (dist > 80)
+                {
+                    score -= 10; rationale.Add($"-10 ({dist:N0} км от Минска)");
                 }
             }
 
