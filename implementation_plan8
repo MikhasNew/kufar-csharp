@@ -1,0 +1,135 @@
+# Отслеживание и фильтрация изменения цен
+
+Цена, которая снижается продавцом, — это отличный маркер "замотивированности" продать быстрее, что открывает хорошее пространство для инвестиционного торга. Возможность фильтровать такие объекты кратно увеличит удобство поиска недооцененных вариантов.
+
+## User Review Required
+
+> [!IMPORTANT]
+> Данный план предполагает добавление свойства `PriceHistories` в модель `Listing`, чтобы мы могли легко доставать историю для карточек объявлений. Это потребует пересборки/перезапуска проекта, но не потребует Entity Framework миграций (т.к. внешний ключ `ListingId` уже есть в истории). Пожалуйста, подтвердите план перед началом работ.
+
+## Proposed Changes
+
+### Models
+
+#### [MODIFY] Models.cs
+Добавить навигационное свойство в `Listing`:
+```csharp
+public List<PriceHistory> PriceHistories { get; set; } = new();
+```
+
+### Services
+
+#### [MODIFY] ListingService.cs
+1. В класс `ListingFilter` добавить флаг `public bool PriceChangedOnly { get; set; }`
+2. В методе `GetListingsAsync`:
+   - Присоединить связанную сущность через `.Include(l => l.PriceHistories)`
+   - Использовать флаг:
+   ```csharp
+   if (filter.PriceChangedOnly)
+       query = query.Where(l => l.PriceHistories.Count > 1);
+   ```
+
+### UI Components
+
+#### [MODIFY] Pages/Listings.razor
+Добавить чекбокс-переключатель в панель фильтров: "📉 Только с изменившейся ценой". Связать его с `filter.PriceChangedOnly`.
+
+#### [MODIFY] Components/ListingCard.razor
+Добавить визуализацию изменения цены. Если `Listing.PriceHistories.Count > 1`, вычислять разницу между последней ценой и самой первой (или предыдущей).
+Отображать бейдж:
+- Зеленый `badge bg-success` со значком вниз (подешевело)
+- Красный `badge bg-danger` со значком вверх (подорожало)
+
+## Open Questions
+
+1. По умолчанию я планирую показывать любые изменения цен (снижение и повышение) при включении фильтра. Если вам хочется фильтровать **только подешевевшие** варианты, скажите мне об этом.
+
+## Verification Plan
+
+### Manual Verification
+1. Открыть страницу со списком объявлений (Listings/Index).
+2. Нажать чекбокс выбора "Только изменившиеся".
+3. Проверить, что список обновился и все карточки показывают разницу в стоимости (например `-5%` или минус конкретная сумма).
+
+Viewed Listings.razor:1-383
+
+Без проблем. Вот готовая пошаговая инструкция с точными блоками кода (копипаст-формат), которую вы можете передать другой модели без необходимости объяснять ей весь контекст проекта.
+
+***
+
+### Контекст для модели
+Твоя задача: реализовать функционал отслеживания изменения цены на объекты недвижимости (Listings). История цен уже пишется в БД (`PriceHistory`), нам нужно дать возможность фильтровать объекты и выводить значок с изменением цены на UI. Проект написан на C# (Blazor Server + EF Core).
+
+Выполни следующие шаги:
+
+#### Шаг 1: Обновление модели Listing
+Открой файл `Models\Models.cs`. В классе `public class Listing` добавь новое свойство для связи с историей цен.
+Добавь строку `public List<PriceHistory> PriceHistories { get; set; } = new();` внутрь класса `Listing`.
+
+#### Шаг 2: Обновление фильтра
+Открой файл `Services\ListingService.cs`.
+Найди класс `public class ListingFilter` (он находится внизу файла) и добавь в него новое свойство:
+```csharp
+    public bool PriceChangedOnly { get; set; }
+```
+
+#### Шаг 3: Обновление запроса в БД
+Открой файл `Services\ListingService.cs`. Найди метод `GetListingsAsync`.
+Измени первую строку метода с `var query = _ctx.Listings.AsQueryable();` на это:
+```csharp
+    var query = _ctx.Listings.Include(l => l.PriceHistories).AsQueryable();
+```
+Прямо перед строкой `var totalCount = await query.CountAsync();` добавь новое условие фильтра:
+```csharp
+    if (filter.PriceChangedOnly)
+    {
+        query = query.Where(l => l.PriceHistories.Count > 1);
+    }
+```
+
+#### Шаг 4: UI для фильтра (Listings.razor)
+Открой `Pages\Listings.razor`. Найди блок `<div class="filter-group">`. В этот блок, сразу после `<div class="distance-filter">...</div>`, вставь чекбокс:
+```html
+            <div class="form-check form-switch ms-2 d-flex align-items-center">
+                <input class="form-check-input me-2" type="checkbox" id="priceChanged" @bind="filter.PriceChangedOnly" style="cursor:pointer; width: 40px; height: 20px;">
+                <label class="form-check-label" for="priceChanged" style="cursor:pointer; font-weight: 500; font-size: 0.9rem;">
+                    📉 Изменилась цена
+                </label>
+            </div>
+```
+
+#### Шаг 5: Индикатор на карточке объекта
+Открой `Pages\Listings.razor` (или `Components\ListingCard.razor` / секцию отрисовки внутри списка). В `Pages\Listings.razor` найди блок:
+```html
+                        <div class="price-info">
+                            <div class="main-price">$@item.PriceUsd.ToString("N0")</div>
+                            <div class="sqm-price">$@item.PricePerSqm.ToString("N0")/м²</div>
+                        </div>
+```
+Замени весь этот блок `price-info` на следующий код:
+
+```html
+                        <div class="price-info">
+                            <div class="main-price">$@item.PriceUsd.ToString("N0")</div>
+                            <div class="sqm-price">$@item.PricePerSqm.ToString("N0")/м²</div>
+                            
+                            @if (item.PriceHistories.Count > 1)
+                            {
+                                var firstPrice = item.PriceHistories.OrderBy(p => p.RecordedAt).First().PriceUsd;
+                                var diff = item.PriceUsd - firstPrice;
+                                if (diff != 0)
+                                {
+                                    <div class="mt-2">
+                                        @if (diff < 0)
+                                        {
+                                            <span class="badge bg-success" title="Было $@firstPrice.ToString("N0")">📉 -$@Math.Abs(diff).ToString("N0")</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-danger" title="Было $@firstPrice.ToString("N0")">📈 +$@Math.Abs(diff).ToString("N0")</span>
+                                        }
+                                    </div>
+                                }
+                            }
+                        </div>
+```

@@ -56,7 +56,7 @@ public class KufarScraper
     public async IAsyncEnumerable<List<Listing>> ScrapeEnumerableAsync(int maxPages = 2, string category = "Квартира")
     {
         var cat = category == "Дом" ? "1020" : "1010";
-        var rgnValues = new[] { "7", "2" };
+        var rgnValues = new[] { "7", "5" }; // 7 = Минск, 5 = Минская область
 
         _logger.LogInformation("Начат потоковый скрапинг Kufar, макс. страниц: {MaxPages}, категория: {Category}", maxPages, category);
         _currentCategory = category;

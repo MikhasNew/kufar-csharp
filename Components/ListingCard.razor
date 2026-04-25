@@ -10,7 +10,29 @@
         <i class="bi bi-star-fill interesting-btn @(Listing.IsInteresting ? "active" : "")" 
            @onclick="ToggleInteresting" style="cursor: pointer;"></i>
     </div>
-    <div class="price-tag">$@Listing.PriceUsd.ToString("N0")</div>
+    <div class="d-flex align-items-center gap-2">
+        <div class="price-tag">$@Listing.PriceUsd.ToString("N0")</div>
+        @if (Listing.PriceHistories?.Count > 1)
+        {
+            var history = Listing.PriceHistories.Where(p => p.PriceUsd > 0).OrderBy(p => p.RecordedAt).ToList();
+            if (history.Count > 1)
+            {
+                var firstPrice = history.First().PriceUsd;
+                var diff = Listing.PriceUsd - firstPrice;
+                if (diff != 0)
+                {
+                    if (diff < 0)
+                    {
+                        <span class="badge bg-success" style="font-size: 0.7rem;" title="Было $@firstPrice.ToString("N0")">📉 -$@Math.Abs(diff).ToString("N0")</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-danger" style="font-size: 0.7rem;" title="Было $@firstPrice.ToString("N0")">📈 +$@Math.Abs(diff).ToString("N0")</span>
+                    }
+                }
+            }
+        }
+    </div>
     <small>@Listing.Area м² • @Listing.Rooms ком • $@Listing.PricePerSqm.ToString("N0")/м²</small>
     <div class="mt-2">
         <span class="badge badge-type">@Listing.FlatType</span>

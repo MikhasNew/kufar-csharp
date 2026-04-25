@@ -38,8 +38,19 @@ public class ListingService
                 // Проверяем, изменилась ли цена
                 if (existing.PriceUsd != item.PriceUsd)
                 {
+                    // Мы должны найти ПЕРВУЮ зафиксированную цену, чтобы знать общий профит/убыток
+                    var firstPrice = await _ctx.PriceHistories
+                        .Where(p => p.ListingId == existing.Id && p.PriceUsd > 0)
+                        .OrderBy(p => p.RecordedAt)
+                        .Select(p => p.PriceUsd)
+                        .FirstOrDefaultAsync();
+
+                    if (firstPrice == 0) firstPrice = existing.PriceUsd;
+
                     existing.PriceUsd = item.PriceUsd;
                     existing.PricePerSqm = item.PricePerSqm;
+                    existing.PriceChangeUsd = item.PriceUsd - firstPrice;
+                    
                     savedListings.Add(existing);
 
                     // Добавляем запись в историю цен
@@ -77,9 +88,11 @@ public class ListingService
                         _ctx.PriceHistories.Add(new PriceHistory
                         {
                             ListingId = listing.Id,
+                            PriceUsd = listing.PriceUsd,
                             PricePerSqm = listing.PricePerSqm,
                             RecordedAt = now
                         });
+                        listing.PriceChangeUsd = 0; // Для нового объявления изменение 0
                     }
                 }
                 await _ctx.SaveChangesAsync();
@@ -89,9 +102,26 @@ public class ListingService
         return (saved, updated, savedListings);
     }
 
+    /// <summary>
+    /// Инициализация поля PriceChangeUsd для существующих записей (разово)
+    /// </summary>
+    public async Task InitializePriceChangesAsync()
+    {
+        var listings = await _ctx.Listings.Include(l => l.PriceHistories).ToListAsync();
+        foreach (var l in listings)
+        {
+            if (l.PriceHistories.Any())
+            {
+                var firstPrice = l.PriceHistories.OrderBy(p => p.RecordedAt).First(p => p.PriceUsd > 0).PriceUsd;
+                l.PriceChangeUsd = l.PriceUsd - firstPrice;
+            }
+        }
+        await _ctx.SaveChangesAsync();
+    }
+
     public async Task<PagedResult<Listing>> GetListingsAsync(ListingFilter? filter = null)
     {
-        var query = _ctx.Listings.AsQueryable();
+        var query = _ctx.Listings.Include(l => l.PriceHistories).AsQueryable();
 
         if (filter != null)
         {
@@ -111,6 +141,23 @@ public class ListingService
                 query = query.Where(l => l.Category == filter.Category);
             if (filter.MaxDistanceToMinsk.HasValue)
                 query = query.Where(l => l.DistanceToMinsk != null && l.DistanceToMinsk <= filter.MaxDistanceToMinsk);
+            
+            if (filter.PriceChangedOnly)
+                query = query.Where(l => l.PriceChangeUsd != 0);
+
+            // Сортировка
+            query = filter.SortBy switch
+            {
+                "price_change_asc" => query.OrderBy(l => l.PriceChangeUsd),
+                "price_change_desc" => query.OrderByDescending(l => l.PriceChangeUsd),
+                "price_asc" => query.OrderBy(l => l.PriceUsd),
+                "price_desc" => query.OrderByDescending(l => l.PriceUsd),
+                _ => query.OrderByDescending(l => l.ScrapedAt)
+            };
+        }
+        else
+        {
+            query = query.OrderByDescending(l => l.ScrapedAt);
         }
 
         var totalCount = await query.CountAsync();
@@ -118,7 +165,6 @@ public class ListingService
         var page = filter?.Page ?? 1;
 
         var items = await query
-            .OrderByDescending(l => l.ScrapedAt)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync();
@@ -207,6 +253,8 @@ public class ListingFilter
     public bool InterestingOnly { get; set; }
     public string? Category { get; set; }
     public double? MaxDistanceToMinsk { get; set; }
+    public bool PriceChangedOnly { get; set; }
+    public string SortBy { get; set; } = "newest";
     public int Page { get; set; } = 1;
     public int PageSize { get; set; } = 20;
 }

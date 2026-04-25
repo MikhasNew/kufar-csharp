@@ -45,6 +45,21 @@
                 <span class="distance-value">@(filter.MaxDistanceToMinsk?.ToString("N0") ?? "∞") км</span>
             </div>
 
+            <div class="form-check form-switch ms-2 d-flex align-items-center">
+                <input class="form-check-input me-2" type="checkbox" id="priceChanged" @bind="filter.PriceChangedOnly" style="cursor:pointer; width: 40px; height: 20px;">
+                <label class="form-check-label" for="priceChanged" style="cursor:pointer; font-weight: 500; font-size: 0.9rem;">
+                    📉 Изменилась цена
+                </label>
+            </div>
+
+            <select class="form-select custom-select" @bind="filter.SortBy" style="min-width: 200px;">
+                <option value="newest">🕒 Новые объявления</option>
+                <option value="price_change_asc">📉 Сначала скидки</option>
+                <option value="price_change_desc">📈 Сначала подорожавшие</option>
+                <option value="price_asc">💰 Сначала дешевые</option>
+                <option value="price_desc">💎 Сначала дорогие</option>
+            </select>
+
             <button class="btn btn-primary search-btn" @onclick="ApplyFilter">
                 <i class="bi bi-search"></i> Найти
             </button>
@@ -95,6 +110,29 @@
                         <div class="price-info">
                             <div class="main-price">$@item.PriceUsd.ToString("N0")</div>
                             <div class="sqm-price">$@item.PricePerSqm.ToString("N0")/м²</div>
+
+                            @if (item.PriceHistories?.Count > 1)
+                            {
+                                var history = item.PriceHistories.Where(p => p.PriceUsd > 0).OrderBy(p => p.RecordedAt).ToList();
+                                if (history.Count > 1)
+                                {
+                                    var firstPrice = history.First().PriceUsd;
+                                    var diff = item.PriceUsd - firstPrice;
+                                    if (diff != 0)
+                                    {
+                                        <div class="mt-2 text-end">
+                                            @if (diff < 0)
+                                            {
+                                                <span class="badge bg-success" title="Было $@firstPrice.ToString("N0")">📉 -$@Math.Abs(diff).ToString("N0")</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-danger" title="Было $@firstPrice.ToString("N0")">📈 +$@Math.Abs(diff).ToString("N0")</span>
+                                            }
+                                        </div>
+                                    }
+                                }
+                            }
                         </div>
                         
                         <div class="btn-group-vertical w-100 mt-3">

@@ -693,7 +693,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         }
 
         // Бонус для недооцененных районов (ниже среднего)
-        var allListings = await _ctx.Listings.ToListAsync();
+        var allListings = await _ctx.Listings.Where(l => l.Category == listing.Category).ToListAsync();
         if (allListings.Any())
         {
             var overallAvg = allListings.Average(l => l.PricePerSqm);
@@ -714,81 +714,150 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     {
         double score = 50; // Базовый
         var rationale = new List<string> { "База (50)" };
+        var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
 
-        // 1-2 комнатные более ликвидные
-        if (listing.Rooms == 1 || listing.Rooms == 2)
+        if (isHouse)
         {
-            score += 20; rationale.Add("+20 (1-2 комн.)");
-        }
-        else if (listing.Rooms == 3)
-        {
-            score += 10; rationale.Add("+10 (3 комн.)");
-        }
+            // --- Правила ликвидности для ДОМОВ ---
 
-        // Ценовой сегмент (до $50k - высокая ликвидность)
-        if (listing.PriceUsd <= 50000)
-        {
-            score += 15; rationale.Add("+15 (<$50k)");
-        }
-        else if (listing.PriceUsd <= 80000)
-        {
-            score += 10; rationale.Add("+10 (<$80k)");
-        }
-        else if (listing.PriceUsd > 150000)
-        {
-            score -= 10; rationale.Add("-10 (>$150k)");
-        }
+            // Размер дома (комнаты)
+            if (listing.Rooms >= 3 && listing.Rooms <= 5)
+            {
+                score += 15; rationale.Add("+15 (3-5 комн.)");
+            }
+            else if (listing.Rooms > 5)
+            {
+                score -= 5; rationale.Add("-5 (>5 комн.)");
+            }
 
-        // Тип дома
-        if (listing.FlatType == "Новостройка")
-        {
-            score += 10; rationale.Add("+10 (Новостройка)");
-        }
-        else if (listing.FlatType == "Кирпичный")
-        {
-            score += 5; rationale.Add("+5 (Кирпичный)");
-        }
+            // Ценовой сегмент
+            if (listing.PriceUsd <= 50000)
+            {
+                score += 15; rationale.Add("+15 (<$50k)");
+            }
+            else if (listing.PriceUsd <= 100000)
+            {
+                score += 10; rationale.Add("+10 (<$100k)");
+            }
+            else if (listing.PriceUsd > 200000)
+            {
+                score -= 10; rationale.Add("-10 (>$200k)");
+            }
 
-        // Этажность: штраф за 1-й и последний этаж
-        if (listing.Floor.HasValue)
-        {
-            if (listing.Floor == 1)
+            // Год постройки
+            if (listing.YearBuilt.HasValue)
             {
-                score -= 10; rationale.Add("-10 (Первый этаж)");
+                if (listing.YearBuilt < 1990)
+                {
+                    score -= 10; rationale.Add("-10 (До 1990)");
+                }
+                else if (listing.YearBuilt >= 2015)
+                {
+                    score += 15; rationale.Add("+15 (Дом >=2015)");
+                }
+                else if (listing.YearBuilt >= 2005)
+                {
+                    score += 5; rationale.Add("+5 (Дом >=2005)");
+                }
             }
-            else if (listing.TotalFloors.HasValue && listing.Floor == listing.TotalFloors)
+
+            // Размер участка
+            if (listing.LotSize.HasValue)
             {
-                score -= 10; rationale.Add("-10 (Последний этаж)");
+                if (listing.LotSize > 15)
+                {
+                    score += 5; rationale.Add("+5 (Участок >15 сот.)");
+                }
+                else if (listing.LotSize >= 6)
+                {
+                    score += 15; rationale.Add("+15 (Участок 6-15 сот.)");
+                }
+                else if (listing.LotSize < 4)
+                {
+                    score -= 5; rationale.Add("-5 (Участок <4 сот.)");
+                }
+            }
+
+            // Материал стен
+            if (!string.IsNullOrEmpty(listing.WallMaterial))
+            {
+                if (listing.WallMaterial.Contains("кирпич", StringComparison.OrdinalIgnoreCase) || 
+                    listing.WallMaterial.Contains("блок", StringComparison.OrdinalIgnoreCase))
+                {
+                    score += 10; rationale.Add("+10 (Кирпич/Блок)");
+                }
+                else if (listing.WallMaterial.Contains("дерев", StringComparison.OrdinalIgnoreCase))
+                {
+                    score -= 5; rationale.Add("-5 (Дерево)");
+                }
             }
         }
-
-        // Год постройки
-        if (listing.YearBuilt.HasValue)
+        else
         {
-            if (listing.YearBuilt < 1975)
-            {
-                score -= 10; rationale.Add("-10 (До 1975)");
-            }
-            else if (listing.YearBuilt >= 2015)
-            {
-                score += 15; rationale.Add("+15 (Дом >=2015)");
-            }
-            else if (listing.YearBuilt >= 2000)
-            {
-                score += 5; rationale.Add("+5 (Дом >=2000)");
-            }
-        }
+            // --- Правила ликвидности для КВАРТИР ---
 
-        if (listing.Category == "Дом" || listing.Category == "Дача")
-        {
-            if (listing.LotSize.HasValue && listing.LotSize > 6)
+            // 1-2 комнатные более ликвидные
+            if (listing.Rooms == 1 || listing.Rooms == 2)
             {
-                score += 10; rationale.Add("+10 (Участок >6 сот.)");
+                score += 20; rationale.Add("+20 (1-2 комн.)");
             }
-            if (!string.IsNullOrEmpty(listing.WallMaterial) && 
-                listing.WallMaterial.Contains("кирпич", StringComparison.OrdinalIgnoreCase))
+            else if (listing.Rooms == 3)
             {
-                score += 10; rationale.Add("+10 (Кирпич)");
+                score += 10; rationale.Add("+10 (3 комн.)");
+            }
+
+            // Ценовой сегмент (до $50k - высокая ликвидность)
+            if (listing.PriceUsd <= 50000)
+            {
+                score += 15; rationale.Add("+15 (<$50k)");
+            }
+            else if (listing.PriceUsd <= 80000)
+            {
+                score += 10; rationale.Add("+10 (<$80k)");
+            }
+            else if (listing.PriceUsd > 150000)
+            {
+                score -= 10; rationale.Add("-10 (>$150k)");
+            }
+
+            // Тип дома
+            if (listing.FlatType == "Новостройка")
+            {
+                score += 10; rationale.Add("+10 (Новостройка)");
+            }
+            else if (listing.FlatType == "Кирпичный")
+            {
+                score += 5; rationale.Add("+5 (Кирпичный)");
+            }
+
+            // Этажность: штраф за 1-й и последний этаж
+            if (listing.Floor.HasValue)
+            {
+                if (listing.Floor == 1)
+                {
+                    score -= 10; rationale.Add("-10 (Первый этаж)");
+                }
+                else if (listing.TotalFloors.HasValue && listing.Floor == listing.TotalFloors)
+                {
+                    score -= 10; rationale.Add("-10 (Последний этаж)");
+                }
+            }
+
+            // Год постройки
+            if (listing.YearBuilt.HasValue)
+            {
+                if (listing.YearBuilt < 1975)
+                {
+                    score -= 10; rationale.Add("-10 (До 1975)");
+                }
+                else if (listing.YearBuilt >= 2015)
+                {
+                    score += 15; rationale.Add("+15 (Дом >=2015)");
+                }
+                else if (listing.YearBuilt >= 2000)
+                {
+                    score += 5; rationale.Add("+5 (Дом >=2000)");
+                }
             }
         }
 

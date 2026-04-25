@@ -31,6 +31,8 @@ public class Listing
     public int? YearBuilt { get; set; }
     public int? Floor { get; set; }
     public int? TotalFloors { get; set; }
+    public List<PriceHistory> PriceHistories { get; set; } = new();
+    public int PriceChangeUsd { get; set; } // Разница между текущей и первой ценой
 }
 
 public class PriceHistory
