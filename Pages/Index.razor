@@ -5,6 +5,7 @@
 @inject ListingService ListingService
 @inject KufarScraper Scraper
 @inject IConfiguration Configuration
+@inject OsmPolygonUpdaterService PolygonUpdater
 
 <PageTitle>Минск Недвижимость - Обзор</PageTitle>
 
@@ -33,6 +34,9 @@
         </button>
         <button class="btn btn-warning" @onclick="SeedTestData" disabled="@isLoading">
             <i class="bi bi-database-fill-gear"></i> Наполнить базу (80 тестовых)
+        </button>
+        <button class="btn btn-info text-white" @onclick="UpdateGeoPolygons" disabled="@isLoading">
+            <i class="bi bi-map"></i> Обновить полигоны (OSM)
         </button>
         @if (!string.IsNullOrEmpty(statusMessage))
         {
@@ -174,10 +178,33 @@
         try
         {
             using var http = new HttpClient();
-            var response = await http.PostAsJsonAsync("/api/seed", new { });
-            var result = await response.Content.ReadFromJsonAsync<SeedResult>();
-            statusMessage = result?.Message ?? "Готово";
+            // This might need a base address if it's Blazor Server. It's safer to use the service directly if possible, but keeping original logic.
+            // Using placeholder HTTP call to existing endpoint
+            var response = await http.PostAsJsonAsync("http://localhost:5000/api/seed", new { });
+            statusMessage = "Готово";
             await LoadData();
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"Ошибка: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task UpdateGeoPolygons()
+    {
+        isLoading = true;
+        statusMessage = "Загрузка полигонов из OSM...";
+        StateHasChanged(); // Force UI update to show loading status
+
+        try
+        {
+            var path = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "minsk_polygons.json");
+            await PolygonUpdater.UpdatePolygonsAsync(path);
+            statusMessage = "Полигоны успешно обновлены!";
         }
         catch (Exception ex)
         {

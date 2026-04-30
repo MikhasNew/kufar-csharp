@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
+using System.Collections.Concurrent;
+using System.Threading;
 using RealEstateMinsk.Data;
 using RealEstateMinsk.Models;
 
@@ -60,6 +62,33 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         {"Фрунзенский район", "Фрунзенский"}, {"Фрунзенскі раён", "Фрунзенский"}
     };
 
+    private static readonly ConcurrentDictionary<string, string> _geoCache = new();
+    private static readonly SemaphoreSlim _nominatimSemaphore = new(1, 1);
+
+    /// <summary>
+    /// Предзагруженный контекст для батчевого скоринга — загружается один раз для всей пачки.
+    /// Устраняет N+1 запросы (раньше ~8 SQL/объявление, теперь 3 SQL на всю пачку).
+    /// </summary>
+    private sealed class ScoringContext
+    {
+        // Все активные объявления (c координатами и ценами)
+        public List<Listing> AllListings { get; init; } = new();
+
+        // Средняя цена/м² по категории
+        public Dictionary<string, double> OverallAvgByCategory { get; init; } = new();
+
+        // Средняя цена/м² по (категория, район)
+        public Dictionary<(string Cat, string Dist), double> DistrictAvg { get; init; } = new();
+
+        // Средняя цена/м² по (категория, тип)
+        public Dictionary<(string Cat, string Type), double> TypeAvg { get; init; } = new();
+
+        // История цен: ListingId → список записей (для тренда)
+        public Dictionary<int, List<PriceHistory>> HistoryByListing { get; init; } = new();
+
+        public DateTime HistoryCutoff { get; init; }
+    }
+
     public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory, MinskGeoService minskGeo)
     {
         _ctx = ctx;
@@ -69,9 +98,83 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     }
 
     /// <summary>
-    /// Рассчитать инвестиционный скоринг для конкретного объявления
+    /// Выполняет 3 SQL-запроса и строит ScoringContext для батчевой обработки.
+    /// </summary>
+    private async Task<ScoringContext> BuildScoringContextAsync()
+    {
+        var cutoff = DateTime.UtcNow.AddDays(-30);
+
+        // 1 SQL: все объявления (id, lat, lon, area, pricePerSqm, district, flatType, category)
+        var allListings = await _ctx.Listings
+            .Select(l => new Listing
+            {
+                Id = l.Id,
+                Latitude = l.Latitude,
+                Longitude = l.Longitude,
+                Area = l.Area,
+                PricePerSqm = l.PricePerSqm,
+                PriceUsd = l.PriceUsd,
+                District = l.District,
+                FlatType = l.FlatType,
+                Category = l.Category,
+                DistanceToMinsk = l.DistanceToMinsk
+            })
+            .ToListAsync();
+
+        // 2 SQL: вся история цен (только нужные поля)
+        var allHistory = await _ctx.PriceHistories
+            .Select(h => new PriceHistory
+            {
+                ListingId = h.ListingId,
+                PricePerSqm = h.PricePerSqm,
+                RecordedAt = h.RecordedAt
+            })
+            .ToListAsync();
+
+        var historyByListing = allHistory
+            .GroupBy(h => h.ListingId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        // In-memory агрегации
+        var overallAvg = allListings
+            .Where(l => l.PricePerSqm > 0)
+            .GroupBy(l => l.Category)
+            .ToDictionary(g => g.Key, g => g.Average(l => l.PricePerSqm));
+
+        var districtAvg = allListings
+            .Where(l => !string.IsNullOrEmpty(l.District) && l.District != "Unknown" && l.PricePerSqm > 0)
+            .GroupBy(l => (l.Category, l.District))
+            .ToDictionary(g => g.Key, g => g.Average(l => l.PricePerSqm));
+
+        var typeAvg = allListings
+            .Where(l => !string.IsNullOrEmpty(l.FlatType) && l.FlatType != "Другой" && l.PricePerSqm > 0)
+            .GroupBy(l => (l.Category, l.FlatType))
+            .ToDictionary(g => g.Key, g => g.Average(l => l.PricePerSqm));
+
+        return new ScoringContext
+        {
+            AllListings = allListings,
+            OverallAvgByCategory = overallAvg,
+            DistrictAvg = districtAvg,
+            TypeAvg = typeAvg,
+            HistoryByListing = historyByListing,
+            HistoryCutoff = cutoff
+        };
+    }
+
+    /// <summary>
+    /// Рассчитать инвестиционный скоринг для одного объявления (для отображения на вкладке)
     /// </summary>
     public async Task<InvestmentScore> CalculateScoreAsync(Listing listing)
+    {
+        var ctx = await BuildScoringContextAsync();
+        return await CalculateScoreWithContextAsync(listing, ctx);
+    }
+
+    /// <summary>
+    /// Внутренний метод скоринга — использует уже загруженный ScoringContext (0 доп. SQL-запросов)
+    /// </summary>
+    private async Task<InvestmentScore> CalculateScoreWithContextAsync(Listing listing, ScoringContext ctx)
     {
         var score = new InvestmentScore
         {
@@ -83,15 +186,12 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         {
             if (listing.Latitude.HasValue && listing.Longitude.HasValue)
             {
-                var (detected, isAuto) = await DetectDistrictAsync(listing.Latitude.Value, listing.Longitude.Value);
+                var (detected, isAuto) = await DetectDistrictAsync(listing.Latitude.Value, listing.Longitude.Value, ctx);
                 if (isAuto && detected != "Unknown")
                 {
                     listing.District = detected;
                     listing.IsDistrictAutoDetected = true;
                     _logger.LogInformation("Район для {ListingId} определен по GPS: {District}", listing.Id, detected);
-                    
-                    _ctx.Listings.Update(listing);
-                    await _ctx.SaveChangesAsync();
                 }
             }
             
@@ -103,29 +203,25 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
                     listing.District = detected;
                     listing.IsDistrictAutoDetected = true;
                     _logger.LogInformation("Район для {ListingId} определен по адресу: {District}", listing.Id, detected);
-                    
-                    _ctx.Listings.Update(listing);
-                    await _ctx.SaveChangesAsync();
                 }
             }
         }
 
         var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
 
-        // 1. Price Attractiveness (35%)
-        (score.PriceAttractiveness, score.PriceRationale) = await CalculatePriceAttractivenessAsync(listing);
+        // 1. Price Attractiveness (35%) — in-memory, 0 SQL
+        (score.PriceAttractiveness, score.PriceRationale) = CalculatePriceAttractivenessFromContext(listing, ctx);
 
         // 2. Location Score (25%)
-        // Для домов — считаем по расстоянию до Минска, для квартир — по рейтингу района
         if (isHouse && listing.DistanceToMinsk.HasValue)
             (score.LocationScore, score.LocationRationale) = CalculateLocationScoreForHouse(listing.DistanceToMinsk.Value);
         else
             (score.LocationScore, score.LocationRationale) = CalculateLocationScore(listing.District);
 
-        // 3. Growth Potential (25%)
-        (score.GrowthPotential, score.GrowthRationale) = await CalculateGrowthPotentialAsync(listing);
+        // 3. Growth Potential (25%) — in-memory, 0 SQL
+        (score.GrowthPotential, score.GrowthRationale) = CalculateGrowthPotentialFromContext(listing, ctx);
 
-        // 4. Liquidity Score (15%)
+        // 4. Liquidity Score (15%) — pure calculation, 0 SQL
         (score.LiquidityScore, score.LiquidityRationale) = CalculateLiquidityScore(listing);
 
         // Общий скоринг
@@ -137,9 +233,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             2
         );
 
-        // Рекомендация
         (score.Recommendation, score.Rationale) = GenerateRecommendation(score, listing);
-
         score.CalculatedAt = DateTime.UtcNow;
 
         return score;
@@ -431,19 +525,28 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     }
 
     /// <summary>
-    /// Пересчитать все инвестиционные скоринги
+    /// Пересчитать все скоринги. Батчевая: все данные загружаются один раз.
     /// </summary>
     public async Task RecalculateAllScoresAsync()
     {
+        _logger.LogInformation("Начало батчевого пересчёта скорингов...");
+        var scoringCtx = await BuildScoringContextAsync();
         var listings = await _ctx.Listings.ToListAsync();
-        var scores = new List<InvestmentScore>();
-
+        var scores = new List<InvestmentScore>(listings.Count);
+        var modifiedListings = new List<Listing>();
+        
         foreach (var listing in listings)
         {
             try
             {
-                var score = await CalculateScoreAsync(listing);
+                var isAutoBefore = listing.IsDistrictAutoDetected;
+                var score = await CalculateScoreWithContextAsync(listing, scoringCtx);
                 scores.Add(score);
+                
+                if (listing.IsDistrictAutoDetected && !isAutoBefore)
+                {
+                    modifiedListings.Add(listing);
+                }
             }
             catch (Exception ex)
             {
@@ -451,206 +554,249 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             }
         }
 
-        // Удаляем старые скоринги
         _ctx.InvestmentScores.RemoveRange(await _ctx.InvestmentScores.ToListAsync());
-
-        // Добавляем новые
         await _ctx.InvestmentScores.AddRangeAsync(scores);
+        
+        if (modifiedListings.Any())
+        {
+            _ctx.Listings.UpdateRange(modifiedListings);
+            _logger.LogInformation("Обновлено {Count} объявлений (авто-определение района)", modifiedListings.Count);
+        }
+
         await _ctx.SaveChangesAsync();
 
-        _logger.LogInformation("Пересчитано {Count} инвестиционных скорингов", scores.Count);
+        _logger.LogInformation("Пересчитано {Count} скорингов (запросов к БД: 3 вместо {Old})", scores.Count, listings.Count * 8);
     }
 
     /// <summary>
     /// Рассчитать и сохранить/обновить скоринги только для переданных объявлений.
-    /// Не удаляет остальные скоринги — идеален для потоковой обработки.
+    /// Батчевая: все данные загружаются один раз + 1 SQL для удаления + 1 SQL для вставки.
     /// </summary>
     public async Task UpsertScoresAsync(IEnumerable<Listing> listings)
     {
         var listingList = listings.ToList();
         if (!listingList.Any()) return;
 
+        // Строим контекст один раз для всей пачки
+        var scoringCtx = await BuildScoringContextAsync();
+
         var listingIds = listingList.Select(l => l.Id).ToHashSet();
-        var scores = new List<InvestmentScore>();
+        var scores = new List<InvestmentScore>(listingList.Count);
+        var modifiedListings = new List<Listing>();
         int successCount = 0;
         int errorCount = 0;
 
         foreach (var listing in listingList)
         {
+            if (listing.Id == 0)
+            {
+                _logger.LogWarning("Пропускаем listing без Id (ExternalId={ExternalId})", listing.ExternalId);
+                errorCount++;
+                continue;
+            }
+
             try
             {
-                // Если у listing ещё нет Id (только добавлен), EF Core заполнит его после SaveChanges
-                // Поэтому нужно убедиться, что Id проставлен
-                if (listing.Id == 0)
-                {
-                    // Listing ещё не сохранён — это ошибка, пропускаем
-                    _logger.LogWarning("Listing с ExternalId={ExternalId} не имеет Id, пропускаем скоринг", listing.ExternalId);
-                    errorCount++;
-                    continue;
-                }
-
-                var score = await CalculateScoreAsync(listing);
+                var isAutoBefore = listing.IsDistrictAutoDetected;
+                var score = await CalculateScoreWithContextAsync(listing, scoringCtx);
                 scores.Add(score);
                 successCount++;
+
+                if (listing.IsDistrictAutoDetected && !isAutoBefore)
+                {
+                    modifiedListings.Add(listing);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Ошибка расчета скоринга для listing {ListingId}", listing.Id);
+                _logger.LogWarning(ex, "Ошибка скоринга для {ListingId}", listing.Id);
                 errorCount++;
             }
         }
 
-        if (scores.Any())
+        if (scores.Count > 0)
         {
-            // Удаляем старые скоринги только для этих listing-ов
             var existingScores = await _ctx.InvestmentScores
                 .Where(s => listingIds.Contains(s.ListingId))
                 .ToListAsync();
             _ctx.InvestmentScores.RemoveRange(existingScores);
-
-            // Добавляем новые
             await _ctx.InvestmentScores.AddRangeAsync(scores);
+
+            if (modifiedListings.Any())
+            {
+                _ctx.Listings.UpdateRange(modifiedListings);
+            }
+
             await _ctx.SaveChangesAsync();
         }
 
-        _logger.LogInformation("UpsertScores: успешно={Success}, ошибок={Errors}, сохранено скорингов={Saved}",
+        _logger.LogInformation("Батч-скоринг: {Success} OK / {Errors} ошибок, сохранено {Saved}",
             successCount, errorCount, scores.Count);
     }
 
     // ==================== PRIVATE HELPER METHODS ====================
 
     /// <summary>
-    /// Расчет привлекательности цены (0-100)
-    /// Чем ниже цена относительно рынка, тем выше балл
+    /// Расчёт привлекательности цены — полностью in-memory (0 SQL-запросов)
     /// </summary>
-    private async Task<(double Score, string Rationale)> CalculatePriceAttractivenessAsync(Listing listing)
+    private static (double Score, string Rationale) CalculatePriceAttractivenessFromContext(Listing listing, ScoringContext ctx)
     {
         var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
         var radiusKm = isHouse ? 5.0 : 1.0;
-        const double AreaTolerancePercent = 0.20; // ±20% по площади считается "аналог"
+        const double AreaTolerance = 0.20;
 
         double radiusAvg = 0;
         int nearbyCount = 0;
 
-        // === Гео-поиск аналогов в радиусе (1 км для квартир, 5 км для домов) ===
+        // Гео-поиск соседей in-memory
         if (listing.Latitude.HasValue && listing.Longitude.HasValue)
         {
             var lat = listing.Latitude.Value;
             var lon = listing.Longitude.Value;
-
-            // Bounding Box для быстрой предварительной фильтрации в SQLite
             var latDiff = radiusKm / 111.0;
             var lonDiff = radiusKm / (111.0 * Math.Cos(ToRadians(lat)));
             var minLat = lat - latDiff;
             var maxLat = lat + latDiff;
             var minLon = lon - lonDiff;
             var maxLon = lon + lonDiff;
+            var minArea = listing.Area * (1 - AreaTolerance);
+            var maxArea = listing.Area * (1 + AreaTolerance);
 
-            // Допустимый диапазон площади (±20%)
-            var minArea = listing.Area * (1 - AreaTolerancePercent);
-            var maxArea = listing.Area * (1 + AreaTolerancePercent);
-
-            // Быстрый запрос к БД по "квадрату" + фильтр по метражу
-            var candidates = await _ctx.Listings
+            // Предварительная быстрая фильтрация по Bounding Box (вся коллекция уже в RAM)
+            var candidates = ctx.AllListings
                 .Where(l => l.Id != listing.Id
                     && l.Latitude.HasValue && l.Longitude.HasValue
                     && l.Latitude >= minLat && l.Latitude <= maxLat
                     && l.Longitude >= minLon && l.Longitude <= maxLon
                     && l.Area >= minArea && l.Area <= maxArea
-                    && l.Category == listing.Category)
-                .ToListAsync();
+                    && l.Category == listing.Category);
 
-            // Точный фильтр по расстоянию (Гаверсинус)
             var nearby = candidates
                 .Where(c => CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value) <= radiusKm)
                 .ToList();
 
             nearbyCount = nearby.Count;
 
-            if (nearbyCount >= 2) // Снижен порог до 2
+            if (nearbyCount >= 2)
             {
-                // IDW (Взвешенная оценка по дистанции)
-                double sumWeights = 0;
-                double sumPriceWeights = 0;
+                double sumW = 0, sumPW = 0;
                 foreach (var c in nearby)
                 {
-                    var dist = CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value);
-                    var weight = 1.0 / (dist + 0.01);
-                    sumWeights += weight;
-                    sumPriceWeights += c.PricePerSqm * weight;
+                    var d = CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value);
+                    var w = 1.0 / (d + 0.01);
+                    sumW += w;
+                    sumPW += c.PricePerSqm * w;
                 }
-                radiusAvg = sumPriceWeights / sumWeights;
+                radiusAvg = sumPW / sumW;
             }
         }
 
-        // === Средняя цена/м² по району (фоллбэк) ===
-        var districtListings = await _ctx.Listings
-            .Where(l => l.District == listing.District && l.District != "Unknown" && l.Category == listing.Category)
-            .ToListAsync();
-        var districtAvg = districtListings.Any() ? districtListings.Average(l => l.PricePerSqm) : 0;
-
-        // === Средняя цена/м² по типу квартиры ===
-        var typeListings = await _ctx.Listings
-            .Where(l => l.FlatType == listing.FlatType && l.FlatType != "Другой" && l.Category == listing.Category)
-            .ToListAsync();
-        var typeAvg = typeListings.Any() ? typeListings.Average(l => l.PricePerSqm) : 0;
-
-        // === Общая средняя ===
-        var allListings = await _ctx.Listings.Where(l => l.Category == listing.Category).ToListAsync();
-        var overallAvg = allListings.Any() ? allListings.Average(l => l.PricePerSqm) : 0;
+        // Фоллбэк-бенчмарки из предзагруженных словарей
+        ctx.DistrictAvg.TryGetValue((listing.Category, listing.District ?? ""), out var districtAvg);
+        ctx.TypeAvg.TryGetValue((listing.Category, listing.FlatType ?? ""), out var typeAvg);
+        ctx.OverallAvgByCategory.TryGetValue(listing.Category, out var overallAvg);
 
         if (radiusAvg == 0 && districtAvg == 0 && typeAvg == 0 && overallAvg == 0)
-            return (50, "Нет данных для сравнения (нейтрально).");
+            return (50, "Нет данных для сравнения.");
 
-        string rationale = "";
-        double benchmark = 0;
+        string rationale;
+        double benchmark;
 
-        // Приоритет бенчмарка: 1) Радиус 1км → 2) Район → 3) Тип → 4) Общая
         if (radiusAvg > 0)
         {
             benchmark = radiusAvg;
-            var minArea = Math.Round(listing.Area * 0.8, 1);
-            var maxArea = Math.Round(listing.Area * 1.2, 1);
-            rationale = $"Найдено {nearbyCount} аналогов в радиусе {radiusKm}км (площадь {minArea}-{maxArea} м²). Метод: Взвешенная средняя (IDW): {Math.Round(benchmark, 0)} $/м².";
+            var mn = Math.Round(listing.Area * 0.8, 1);
+            var mx = Math.Round(listing.Area * 1.2, 1);
+            rationale = $"Найдено {nearbyCount} аналогов в {radiusKm} км ({mn}-{mx} м²), IDW: {Math.Round(benchmark, 0)} $/м².";
         }
         else if (nearbyCount > 0)
         {
-            benchmark = districtAvg > 0 ? districtAvg : (typeAvg > 0 ? typeAvg : overallAvg);
-            rationale = $"В радиусе {radiusKm}км найдено лишь {nearbyCount} аналога (нужно 2 для IDW). Фоллбэк на " + 
-                        (districtAvg > 0 ? $"район '{listing.District}'" : (typeAvg > 0 ? $"тип '{listing.FlatType}'" : "город")) + 
-                        $": {Math.Round(benchmark, 0)} $/м².";
+            benchmark = districtAvg > 0 ? districtAvg : typeAvg > 0 ? typeAvg : overallAvg;
+            var src = districtAvg > 0 ? $"район '{listing.District}'" : typeAvg > 0 ? $"тип '{listing.FlatType}'" : "город";
+            rationale = $"<2 аналогов в {radiusKm} км. Фоллбэк на {src}: {Math.Round(benchmark, 0)} $/м².";
         }
         else if (districtAvg > 0)
         {
             benchmark = districtAvg;
-            rationale = $"Средняя по району '{listing.District}': {Math.Round(benchmark, 0)} $/м².";
+            rationale = $"Ср. по району '{listing.District}': {Math.Round(benchmark, 0)} $/м².";
         }
         else if (typeAvg > 0)
         {
             benchmark = typeAvg;
-            rationale = $"Средняя для типа '{listing.FlatType}': {Math.Round(benchmark, 0)} $/м².";
+            rationale = $"Ср. для типа '{listing.FlatType}': {Math.Round(benchmark, 0)} $/м².";
         }
         else
         {
             benchmark = overallAvg;
-            rationale = $"Общая средняя по городу: {Math.Round(benchmark, 0)} $/м².";
+            rationale = $"Общая средняя: {Math.Round(benchmark, 0)} $/м².";
         }
 
         var deviation = (benchmark - listing.PricePerSqm) / benchmark;
-        var percent = Math.Round(deviation * 100, 1);
-        
-        rationale += (percent > 0 ? $" Объект дешевле на {percent}%." : $" Объект дороже на {Math.Abs(percent)}%.");
-        
-        if (listing.IsDistrictAutoDetected)
-        {
-            rationale += " (Район определен по координатам).";
-        }
+        var pct = Math.Round(deviation * 100, 1);
+        rationale += pct > 0 ? $" Дешевле на {pct}%." : $" Дороже на {Math.Abs(pct)}%.";
+        if (listing.IsDistrictAutoDetected) rationale += " (район по координатам)";
 
-        rationale += $" [Обновлено: {DateTime.Now:dd.MM HH:mm}]";
-
-        // Нормализация в 0-100
         var score = Math.Round((0.5 + deviation / 0.6) * 100, 2);
         return (Math.Clamp(score, 0, 100), rationale);
+    }
+
+    /// <summary>
+    /// Расчёт потенциала роста — in-memory (0 SQL-запросов)
+    /// </summary>
+    private static (double Score, string Rationale) CalculateGrowthPotentialFromContext(Listing listing, ScoringContext ctx)
+    {
+        var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
+        var rationale = new List<string>();
+
+        var cutoff = ctx.HistoryCutoff;
+        var districtListingIds = ctx.AllListings
+            .Where(l => l.District == listing.District && l.Category == listing.Category)
+            .Select(l => l.Id)
+            .ToHashSet();
+
+        var oldPrices = ctx.HistoryByListing
+            .Where(kv => districtListingIds.Contains(kv.Key))
+            .SelectMany(kv => kv.Value)
+            .Where(h => DateTime.TryParse(h.RecordedAt, out var d) && d < cutoff)
+            .Select(h => h.PricePerSqm)
+            .ToList();
+
+        var curAvg = ctx.AllListings
+            .Where(l => l.District == listing.District && l.Category == listing.Category && l.PricePerSqm > 0)
+            .Select(l => l.PricePerSqm)
+            .DefaultIfEmpty(0).Average();
+
+        double score;
+        if (oldPrices.Count >= 3)
+        {
+            var prevAvg = oldPrices.Average();
+            var change = prevAvg > 0 ? (curAvg - prevAvg) / prevAvg * 100 : 0;
+            score = change switch { > 2 => 70 + Math.Min(30, change * 5), < -2 => Math.Max(20, 50 + change * 5), _ => 50 };
+            rationale.Add($"Тренд района: {Math.Round(change, 1)}% за 30 дней.");
+        }
+        else
+        {
+            score = 50;
+            rationale.Add("Мало исторических данных для тренда.");
+        }
+
+        if (isHouse && listing.DistanceToMinsk.HasValue)
+        {
+            var dist = listing.DistanceToMinsk.Value;
+            if (dist <= 20)  { score += 15; rationale.Add($"+15 ({dist:N0} км — высокий спрос на пригород)."); }
+            else if (dist <= 30) { score += 10; rationale.Add($"+10 ({dist:N0} км — субурбанизация)."); }
+            else if (dist > 120) { score -= 25; rationale.Add($"-25 ({dist:N0} км — очень низкий спрос)."); }
+            else if (dist > 80)  { score -= 15; rationale.Add($"-15 ({dist:N0} км — удалённый объект)."); }
+        }
+
+        if (ctx.OverallAvgByCategory.TryGetValue(listing.Category, out var overallAvg) && overallAvg > 0
+            && listing.PricePerSqm < overallAvg * 0.85)
+        {
+            score += 10;
+            rationale.Add("+10 (цена ниже рынка).");
+        }
+
+        return (Math.Round(Math.Clamp(score, 0, 100), 2), string.Join(" ", rationale));
     }
 
     /// <summary>
@@ -986,7 +1132,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Определение района (Hybrid: Local Polygon -> DB Nearest 1km -> OSM API)
     /// </summary>
-    private async Task<(string District, bool AutoDetected)> DetectDistrictAsync(double lat, double lon)
+    private async Task<(string District, bool AutoDetected)> DetectDistrictAsync(double lat, double lon, ScoringContext ctx)
     {
         // 1. Локальный геокодер (мгновенно, без HTTP)
         var localDistrict = _minskGeo.GetDistrictByCoords(lat, lon);
@@ -996,15 +1142,15 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             return (localDistrict, true);
         }
 
-        // 2. Поиск в БД в радиусе 1 км (фоллбэк для пригородов)
+        // 2. Поиск в памяти в радиусе 1 км (фоллбэк для пригородов)
         var latDiff = 1.0 / 111.0;
         var lonDiff = 1.0 / (111.0 * Math.Cos(ToRadians(lat)));
-        var candidates = await _ctx.Listings
+        var candidates = ctx.AllListings
             .Where(l => l.Latitude.HasValue && l.Longitude.HasValue
                 && l.Latitude >= lat - latDiff && l.Latitude <= lat + latDiff
                 && l.Longitude >= lon - lonDiff && l.Longitude <= lon + lonDiff
                 && l.District != "Unknown" && !string.IsNullOrEmpty(l.District))
-            .ToListAsync();
+            .ToList();
 
         var nearest = candidates
             .Select(c => new { Dist = CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value), c.District })
@@ -1018,20 +1164,39 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         }
 
         // 3. OSM Nominatim API Fallback (последний resort)
+        var cacheKey = $"coords_{Math.Round(lat, 4)}_{Math.Round(lon, 4)}";
+        if (_geoCache.TryGetValue(cacheKey, out var cached))
+        {
+            return (cached, true);
+        }
+
         try
         {
-            var client = _httpClientFactory.CreateClient("Nominatim");
-            var url = $"https://nominatim.openstreetmap.org/reverse?lat={lat.ToString(System.Globalization.CultureInfo.InvariantCulture)}&lon={lon.ToString(System.Globalization.CultureInfo.InvariantCulture)}&format=json&accept-language=ru";
-            var response = await client.GetFromJsonAsync<System.Text.Json.Nodes.JsonObject>(url);
-
-            var districtNode = response?["address"]?["city_district"] ?? response?["address"]?["suburb"];
-            if (districtNode != null)
+            await _nominatimSemaphore.WaitAsync();
+            try
             {
-                var rawDistrict = districtNode.ToString().Trim();
-                if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
+                var client = _httpClientFactory.CreateClient("Nominatim");
+                var url = $"https://nominatim.openstreetmap.org/reverse?lat={lat.ToString(System.Globalization.CultureInfo.InvariantCulture)}&lon={lon.ToString(System.Globalization.CultureInfo.InvariantCulture)}&format=json&accept-language=ru";
+                var response = await client.GetFromJsonAsync<System.Text.Json.Nodes.JsonObject>(url);
 
-                var cleaned = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
-                return (cleaned, true);
+                var districtNode = response?["address"]?["city_district"] ?? response?["address"]?["suburb"];
+                if (districtNode != null)
+                {
+                    var rawDistrict = districtNode.ToString().Trim();
+                    string detected;
+                    if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched))
+                        detected = matched;
+                    else
+                        detected = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
+
+                    _geoCache.TryAdd(cacheKey, detected);
+                    return (detected, true);
+                }
+            }
+            finally
+            {
+                await Task.Delay(1000); // Respect OSM 1 req/sec limit
+                _nominatimSemaphore.Release();
             }
         }
         catch (Exception ex)
@@ -1056,27 +1221,46 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         }
 
         // 2. OSM Nominatim API Fallback
+        var cacheKey = $"addr_{address.ToLowerInvariant()}";
+        if (_geoCache.TryGetValue(cacheKey, out var cached))
+        {
+            return (cached, true);
+        }
+
         try
         {
-            var client = _httpClientFactory.CreateClient("Nominatim");
-            // Добавляем "Минск" к запросу для точности
-            var query = Uri.EscapeDataString($"{address}, Минск");
-            var url = $"https://nominatim.openstreetmap.org/search?q={query}&format=json&addressdetails=1&limit=1&accept-language=ru";
-
-            var results = await client.GetFromJsonAsync<System.Text.Json.Nodes.JsonArray>(url);
-            if (results != null && results.Count > 0)
+            await _nominatimSemaphore.WaitAsync();
+            try
             {
-                var addressNode = results[0]?["address"];
-                var districtNode = addressNode?["city_district"] ?? addressNode?["suburb"];
+                var client = _httpClientFactory.CreateClient("Nominatim");
+                // Добавляем "Минск" к запросу для точности
+                var query = Uri.EscapeDataString($"{address}, Минск");
+                var url = $"https://nominatim.openstreetmap.org/search?q={query}&format=json&addressdetails=1&limit=1&accept-language=ru";
 
-                if (districtNode != null)
+                var results = await client.GetFromJsonAsync<System.Text.Json.Nodes.JsonArray>(url);
+                if (results != null && results.Count > 0)
                 {
-                    var rawDistrict = districtNode.ToString().Trim();
-                    if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched)) return (matched, true);
+                    var addressNode = results[0]?["address"];
+                    var districtNode = addressNode?["city_district"] ?? addressNode?["suburb"];
 
-                    var cleaned = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
-                    return (cleaned, true);
+                    if (districtNode != null)
+                    {
+                        var rawDistrict = districtNode.ToString().Trim();
+                        string detected;
+                        if (_osmDistrictMapping.TryGetValue(rawDistrict, out var matched))
+                            detected = matched;
+                        else
+                            detected = rawDistrict.Replace(" район", "").Replace(" раён", "").Trim();
+
+                        _geoCache.TryAdd(cacheKey, detected);
+                        return (detected, true);
+                    }
                 }
+            }
+            finally
+            {
+                await Task.Delay(1000); // Respect OSM 1 req/sec limit
+                _nominatimSemaphore.Release();
             }
         }
         catch (Exception ex)

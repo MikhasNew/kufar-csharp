@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace RealEstateMinsk.Services;
 
 /// <summary>
@@ -6,11 +8,39 @@ namespace RealEstateMinsk.Services;
 /// </summary>
 public class MinskGeoService
 {
-    /// <summary>
-    /// Упрощённые полигоны районов Минска (lat, lon).
-    /// Границы аппроксимированы 8-16 вершинами для покрытия основных жилых зон.
-    /// </summary>
-    private readonly Dictionary<string, (double Lat, double Lon)[]> _districtPolygons = new()
+    private Dictionary<string, (double Lat, double Lon)[]> _districtPolygons = new();
+    
+    public MinskGeoService()
+    {
+        LoadPolygons();
+    }
+
+    private void LoadPolygons()
+    {
+        var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "minsk_polygons.json");
+        if (File.Exists(path))
+        {
+            try
+            {
+                var json = File.ReadAllText(path);
+                var data = JsonSerializer.Deserialize<Dictionary<string, List<double[]>>>(json);
+                if (data != null)
+                {
+                    _districtPolygons = data.ToDictionary(
+                        kv => kv.Key,
+                        kv => kv.Value.Select(p => (p[0], p[1])).ToArray()
+                    );
+                    return;
+                }
+            }
+            catch { /* Fallback to hardcoded */ }
+        }
+
+        // Фоллбэк на упрощённые полигоны, если файл отсутствует
+        _districtPolygons = GetDefaultPolygons();
+    }
+
+    private Dictionary<string, (double Lat, double Lon)[]> GetDefaultPolygons() => new()
     {
         ["Центральный"] = new[]
         {
@@ -108,9 +138,11 @@ public class MinskGeoService
         // Советский
         ["Зелёный Луг"] = "Советский", ["Сельхозпоселок"] = "Советский", ["Якуба Коласа"] = "Советский",
         // Центральный
-        ["Лебяжий"] = "Центральный", ["Веснянка"] = "Центральный", ["Новинки"] = "Центральный", ["Победителей"] = "Центральный",
+        ["Лебяжий"] = "Центральный", ["Веснянка"] = "Центральный", ["Новинки"] = "Центральный", ["Победителей"] = "Центральный", ["Осмоловка"] = "Центральный", ["Сторожевская"] = "Центральный",
         // Партизанский
-        ["Степянка"] = "Партизанский", ["Дражня"] = "Партизанский"
+        ["Степянка"] = "Партизанский", ["Дражня"] = "Партизанский", ["Тракторный завод"] = "Партизанский",
+        // Новые / уточненные
+        ["Новая Боровая"] = "Первомайский", ["Копище"] = "Первомайский", ["Северный Берег"] = "Центральный"
     };
 
     /// <summary>

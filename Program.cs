@@ -14,6 +14,7 @@ builder.Services.AddScoped<ListingService>();
 builder.Services.AddScoped<IInvestmentAnalyzer, InvestmentAnalyzer>();
 builder.Services.AddScoped<DataSeeder>();
 builder.Services.AddSingleton<MinskGeoService>();
+builder.Services.AddHttpClient<OsmPolygonUpdaterService>();
 
 // Фоновый сервис для автоматического сбора данных
 builder.Services.AddHostedService<DataCollectionService>();
@@ -142,6 +143,13 @@ app.MapGet("/api/test/enrichment", async (AppDbContext db) =>
         .ToListAsync();
 
     return Results.Ok(new { total, autoDetected, unknown, withCoords, samples });
+});
+
+app.MapPost("/api/geo/update-polygons", async (OsmPolygonUpdaterService updater) =>
+{
+    var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "minsk_polygons.json");
+    await updater.UpdatePolygonsAsync(path);
+    return Results.Ok(new { message = "Обновление полигонов запущено/завершено. Проверьте логи." });
 });
 
 app.MapBlazorHub();
