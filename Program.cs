@@ -14,7 +14,11 @@ builder.Services.AddScoped<ListingService>();
 builder.Services.AddScoped<IInvestmentAnalyzer, InvestmentAnalyzer>();
 builder.Services.AddScoped<DataSeeder>();
 builder.Services.AddSingleton<MinskGeoService>();
-builder.Services.AddHttpClient<OsmPolygonUpdaterService>();
+builder.Services.AddSingleton<UpdateProgressService>();
+builder.Services.AddHttpClient<OsmPolygonUpdaterService>(client =>
+{
+    client.DefaultRequestHeaders.Add("User-Agent", "RealEstateMinsk/1.0");
+});
 
 // Фоновый сервис для автоматического сбора данных
 builder.Services.AddHostedService<DataCollectionService>();

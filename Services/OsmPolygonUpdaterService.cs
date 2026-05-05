@@ -8,26 +8,32 @@ public class OsmPolygonUpdaterService
 {
     private readonly HttpClient _http;
     private readonly ILogger<OsmPolygonUpdaterService> _logger;
+    private readonly UpdateProgressService _progress;
     private const string OverpassUrl = "https://overpass-api.de/api/interpreter";
 
-    public OsmPolygonUpdaterService(HttpClient http, ILogger<OsmPolygonUpdaterService> logger)
+    public OsmPolygonUpdaterService(HttpClient http, ILogger<OsmPolygonUpdaterService> logger, UpdateProgressService progress)
     {
         _http = http;
         _logger = logger;
+        _progress = progress;
     }
 
     public async Task UpdatePolygonsAsync(string outputPath)
     {
         _logger.LogInformation("Начало обновления полигонов районов Минска из OSM...");
+        _progress.Start("Подключение к Overpass API...");
 
         try
         {
-            // Запрос всех административных районов Минска (admin_level=9)
+            _progress.Report(10, "Запрос данных из OSM...");
+            // Запрос всех административных районов Минской области (admin_level=6) и Минска (admin_level=9)
             var query = @"
                 [out:json];
-                area[""name:en""=""Minsk""][""admin_level""=""4""]->.a;
+                area[""name:ru""=""Минская область""][""admin_level""=""4""]->.region;
+                area[""name:ru""=""Минск""][""admin_level""=""4""]->.city;
                 (
-                  rel(area.a)[""admin_level""=""9""][""boundary""=""administrative""];
+                  rel(area.region)[""admin_level""=""6""][""boundary""=""administrative""];
+                  rel(area.city)[""admin_level""=""9""][""boundary""=""administrative""];
                 );
                 out body;
                 >;
@@ -41,9 +47,11 @@ public class OsmPolygonUpdaterService
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("Ошибка запроса к Overpass API: {StatusCode}", response.StatusCode);
+                _progress.Reset();
                 return;
             }
 
+            _progress.Report(40, "Парсинг ответа OSM...");
             var json = await response.Content.ReadAsStringAsync();
             var data = JsonDocument.Parse(json);
             
@@ -78,8 +86,13 @@ public class OsmPolygonUpdaterService
 
             var resultPolygons = new Dictionary<string, List<(double Lat, double Lon)>>();
 
+            int processedRelations = 0;
             foreach (var rel in relations)
             {
+                processedRelations++;
+                var prog = 40 + (processedRelations * 50.0 / Math.Max(1, relations.Count));
+                _progress.Report(prog, $"Обработка района: {rel.Name}");
+
                 var fullPolygon = new List<(double Lat, double Lon)>();
                 
                 // Склеиваем веи (пути) в один полигон
@@ -115,10 +128,14 @@ public class OsmPolygonUpdaterService
 
             await File.WriteAllTextAsync(outputPath, finalJson);
             _logger.LogInformation("Полигоны успешно сохранены в {Path}", outputPath);
+            _progress.Report(100, "Готово!");
+            await Task.Delay(1000); // Даем пользователю увидеть 100%
+            _progress.Reset();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Критическая ошибка при обновлении полигонов");
+            _progress.Reset();
         }
     }
 

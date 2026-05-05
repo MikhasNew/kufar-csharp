@@ -53,10 +53,10 @@ public class KufarScraper
     /// это список объявлений с одной загруженной страницы. Позволяет обрабатывать
     /// данные по мере поступления, не дожидаясь загрузки всех страниц.
     /// </summary>
-    public async IAsyncEnumerable<List<Listing>> ScrapeEnumerableAsync(int maxPages = 2, string category = "Квартира")
+    public async IAsyncEnumerable<List<Listing>> ScrapeEnumerableAsync(int maxPages = 2, string category = "Квартира", string? region = null)
     {
         var cat = category == "Дом" ? "1020" : "1010";
-        var rgnValues = new[] { "7", "5" }; // 7 = Минск, 5 = Минская область
+        var rgnValues = region != null ? new[] { region } : new[] { "7", "5" }; // 7 = Минск, 5 = Минская область
 
         _logger.LogInformation("Начат потоковый скрапинг Kufar, макс. страниц: {MaxPages}, категория: {Category}", maxPages, category);
         _currentCategory = category;

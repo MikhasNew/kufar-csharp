@@ -28,6 +28,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     private readonly ILogger<InvestmentAnalyzer> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly MinskGeoService _minskGeo;
+    private readonly IConfiguration _config;
 
     // Веса для формулы скоринга
     private const double PriceWeight = 0.35;
@@ -89,12 +90,13 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         public DateTime HistoryCutoff { get; init; }
     }
 
-    public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory, MinskGeoService minskGeo)
+    public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory, MinskGeoService minskGeo, IConfiguration config)
     {
         _ctx = ctx;
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _minskGeo = minskGeo;
+        _config = config;
     }
 
     /// <summary>
@@ -168,13 +170,14 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     public async Task<InvestmentScore> CalculateScoreAsync(Listing listing)
     {
         var ctx = await BuildScoringContextAsync();
-        return await CalculateScoreWithContextAsync(listing, ctx);
+        var allowExternal = _config.GetValue<bool>("InvestmentAnalysis:AllowExternalGeoApi", true);
+        return await CalculateScoreWithContextAsync(listing, ctx, useExternalApi: allowExternal);
     }
 
     /// <summary>
     /// Внутренний метод скоринга — использует уже загруженный ScoringContext (0 доп. SQL-запросов)
     /// </summary>
-    private async Task<InvestmentScore> CalculateScoreWithContextAsync(Listing listing, ScoringContext ctx)
+    private async Task<InvestmentScore> CalculateScoreWithContextAsync(Listing listing, ScoringContext ctx, bool useExternalApi = true)
     {
         var score = new InvestmentScore
         {
@@ -186,7 +189,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         {
             if (listing.Latitude.HasValue && listing.Longitude.HasValue)
             {
-                var (detected, isAuto) = await DetectDistrictAsync(listing.Latitude.Value, listing.Longitude.Value, ctx);
+                var (detected, isAuto) = await DetectDistrictAsync(listing.Latitude.Value, listing.Longitude.Value, ctx, useExternalApi);
                 if (isAuto && detected != "Unknown")
                 {
                     listing.District = detected;
@@ -197,7 +200,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             
             if ((string.IsNullOrEmpty(listing.District) || listing.District == "Unknown") && !string.IsNullOrEmpty(listing.Location))
             {
-                var (detected, isAuto) = await DetectDistrictByAddressAsync(listing.Location);
+                var (detected, isAuto) = await DetectDistrictByAddressAsync(listing.Location, useExternalApi);
                 if (isAuto && detected != "Unknown")
                 {
                     listing.District = detected;
@@ -539,8 +542,9 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         {
             try
             {
+                var allowExternal = _config.GetValue<bool>("InvestmentAnalysis:AllowExternalGeoApi", false);
                 var isAutoBefore = listing.IsDistrictAutoDetected;
-                var score = await CalculateScoreWithContextAsync(listing, scoringCtx);
+                var score = await CalculateScoreWithContextAsync(listing, scoringCtx, useExternalApi: allowExternal);
                 scores.Add(score);
                 
                 if (listing.IsDistrictAutoDetected && !isAutoBefore)
@@ -597,8 +601,9 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
 
             try
             {
+                var allowExternal = _config.GetValue<bool>("InvestmentAnalysis:AllowExternalGeoApi", false);
                 var isAutoBefore = listing.IsDistrictAutoDetected;
-                var score = await CalculateScoreWithContextAsync(listing, scoringCtx);
+                var score = await CalculateScoreWithContextAsync(listing, scoringCtx, useExternalApi: allowExternal);
                 scores.Add(score);
                 successCount++;
 
@@ -642,101 +647,127 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     private static (double Score, string Rationale) CalculatePriceAttractivenessFromContext(Listing listing, ScoringContext ctx)
     {
         var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
-        var radiusKm = isHouse ? 5.0 : 1.0;
+        
+        // Разные шкалы радиусов для квартир и домов
+        var searchSteps = isHouse 
+            ? new double[] { 5.0, 10.0, 20.0, 35.0, 50.0 }
+            : new double[] { 1.0, 3.0, 5.0, 7.0, 10.0 };
+            
+        // Веса доверия для каждого шага
+        var confidenceWeights = new double[] { 1.0, 0.85, 0.70, 0.55, 0.40 };
+
         const double AreaTolerance = 0.20;
 
-        double radiusAvg = 0;
+        double benchmark = 0;
         int nearbyCount = 0;
+        double usedRadius = 0;
+        double usedConfidence = 1.0;
+        string rationale = "";
 
-        // Гео-поиск соседей in-memory
+        // Гео-поиск соседей in-memory с расширяющимся радиусом
         if (listing.Latitude.HasValue && listing.Longitude.HasValue)
         {
             var lat = listing.Latitude.Value;
             var lon = listing.Longitude.Value;
-            var latDiff = radiusKm / 111.0;
-            var lonDiff = radiusKm / (111.0 * Math.Cos(ToRadians(lat)));
-            var minLat = lat - latDiff;
-            var maxLat = lat + latDiff;
-            var minLon = lon - lonDiff;
-            var maxLon = lon + lonDiff;
             var minArea = listing.Area * (1 - AreaTolerance);
             var maxArea = listing.Area * (1 + AreaTolerance);
 
-            // Предварительная быстрая фильтрация по Bounding Box (вся коллекция уже в RAM)
+            // Фильтруем кандидатов без учета расстояния (пока только по площади и категории)
             var candidates = ctx.AllListings
                 .Where(l => l.Id != listing.Id
                     && l.Latitude.HasValue && l.Longitude.HasValue
-                    && l.Latitude >= minLat && l.Latitude <= maxLat
-                    && l.Longitude >= minLon && l.Longitude <= maxLon
                     && l.Area >= minArea && l.Area <= maxArea
-                    && l.Category == listing.Category);
-
-            var nearby = candidates
-                .Where(c => CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value) <= radiusKm)
+                    && l.Category == listing.Category)
                 .ToList();
 
-            nearbyCount = nearby.Count;
-
-            if (nearbyCount >= 2)
+            // Пробуем найти аналоги, постепенно увеличивая радиус
+            for (int i = 0; i < searchSteps.Length; i++)
             {
-                double sumW = 0, sumPW = 0;
-                foreach (var c in nearby)
+                var currentRadius = searchSteps[i];
+                var latDiff = currentRadius / 111.0;
+                var lonDiff = currentRadius / (111.0 * Math.Cos(ToRadians(lat)));
+                
+                // Предварительная быстрая фильтрация по Bounding Box
+                var bboxCandidates = candidates
+                    .Where(c => c.Latitude >= lat - latDiff && c.Latitude <= lat + latDiff
+                             && c.Longitude >= lon - lonDiff && c.Longitude <= lon + lonDiff);
+
+                var nearby = bboxCandidates
+                    .Where(c => CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value) <= currentRadius)
+                    .ToList();
+
+                if (nearby.Count >= 2)
                 {
-                    var d = CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value);
-                    var w = 1.0 / (d + 0.01);
-                    sumW += w;
-                    sumPW += c.PricePerSqm * w;
+                    double sumW = 0, sumPW = 0;
+                    foreach (var c in nearby)
+                    {
+                        var d = CalculateDistanceKm(lat, lon, c.Latitude!.Value, c.Longitude!.Value);
+                        var w = 1.0 / (d + 0.01);
+                        sumW += w;
+                        sumPW += c.PricePerSqm * w;
+                    }
+                    
+                    benchmark = sumPW / sumW;
+                    nearbyCount = nearby.Count;
+                    usedRadius = currentRadius;
+                    usedConfidence = confidenceWeights[i];
+                    
+                    var mn = Math.Round(minArea, 1);
+                    var mx = Math.Round(maxArea, 1);
+                    rationale = $"Найдено {nearbyCount} аналогов в {usedRadius} км ({mn}-{mx} м²), IDW: {Math.Round(benchmark, 0)} $/м².";
+                    break; // Нашли достаточно аналогов, останавливаем поиск
                 }
-                radiusAvg = sumPW / sumW;
             }
         }
 
-        // Фоллбэк-бенчмарки из предзагруженных словарей
-        ctx.DistrictAvg.TryGetValue((listing.Category, listing.District ?? ""), out var districtAvg);
-        ctx.TypeAvg.TryGetValue((listing.Category, listing.FlatType ?? ""), out var typeAvg);
-        ctx.OverallAvgByCategory.TryGetValue(listing.Category, out var overallAvg);
+        // Фоллбэк-бенчмарки из предзагруженных словарей (если аналоги не найдены даже в максимальном радиусе)
+        if (benchmark == 0)
+        {
+            ctx.DistrictAvg.TryGetValue((listing.Category, listing.District ?? ""), out var districtAvg);
+            ctx.TypeAvg.TryGetValue((listing.Category, listing.FlatType ?? ""), out var typeAvg);
+            ctx.OverallAvgByCategory.TryGetValue(listing.Category, out var overallAvg);
 
-        if (radiusAvg == 0 && districtAvg == 0 && typeAvg == 0 && overallAvg == 0)
-            return (50, "Нет данных для сравнения.");
-
-        string rationale;
-        double benchmark;
-
-        if (radiusAvg > 0)
-        {
-            benchmark = radiusAvg;
-            var mn = Math.Round(listing.Area * 0.8, 1);
-            var mx = Math.Round(listing.Area * 1.2, 1);
-            rationale = $"Найдено {nearbyCount} аналогов в {radiusKm} км ({mn}-{mx} м²), IDW: {Math.Round(benchmark, 0)} $/м².";
-        }
-        else if (nearbyCount > 0)
-        {
-            benchmark = districtAvg > 0 ? districtAvg : typeAvg > 0 ? typeAvg : overallAvg;
-            var src = districtAvg > 0 ? $"район '{listing.District}'" : typeAvg > 0 ? $"тип '{listing.FlatType}'" : "город";
-            rationale = $"<2 аналогов в {radiusKm} км. Фоллбэк на {src}: {Math.Round(benchmark, 0)} $/м².";
-        }
-        else if (districtAvg > 0)
-        {
-            benchmark = districtAvg;
-            rationale = $"Ср. по району '{listing.District}': {Math.Round(benchmark, 0)} $/м².";
-        }
-        else if (typeAvg > 0)
-        {
-            benchmark = typeAvg;
-            rationale = $"Ср. для типа '{listing.FlatType}': {Math.Round(benchmark, 0)} $/м².";
-        }
-        else
-        {
-            benchmark = overallAvg;
-            rationale = $"Общая средняя: {Math.Round(benchmark, 0)} $/м².";
+            if (districtAvg > 0)
+            {
+                benchmark = districtAvg;
+                usedConfidence = 0.40; // Очень слабое доверие к среднему по району
+                rationale = $"Аналогов в {searchSteps.Last()} км не найдено. Ср. по району '{listing.District}': {Math.Round(benchmark, 0)} $/м².";
+            }
+            else if (typeAvg > 0)
+            {
+                benchmark = typeAvg;
+                usedConfidence = 0.30; // Ещё более слабое доверие к типу
+                rationale = $"Аналогов нет. Фоллбэк на ср. для типа '{listing.FlatType}': {Math.Round(benchmark, 0)} $/м².";
+            }
+            else if (overallAvg > 0)
+            {
+                benchmark = overallAvg;
+                usedConfidence = 0.20; // Минимальное доверие к средней по городу
+                rationale = $"Аналогов нет. Фоллбэк на общую среднюю: {Math.Round(benchmark, 0)} $/м².";
+            }
+            else
+            {
+                return (50, "Нет данных для сравнения.");
+            }
         }
 
         var deviation = (benchmark - listing.PricePerSqm) / benchmark;
-        var pct = Math.Round(deviation * 100, 1);
+        
+        // Применяем вес уверенности (confidence). Если уверенность низкая, отклонение уменьшается
+        var weightedDeviation = deviation * usedConfidence;
+        
+        var pct = Math.Round(deviation * 100, 1); // Показываем реальное отклонение в процентах
         rationale += pct > 0 ? $" Дешевле на {pct}%." : $" Дороже на {Math.Abs(pct)}%.";
-        if (listing.IsDistrictAutoDetected) rationale += " (район по координатам)";
+        
+        if (usedConfidence < 1.0)
+        {
+            rationale += $" (Доверие: {Math.Round(usedConfidence * 100)}%)";
+        }
 
-        var score = Math.Round((0.5 + deviation / 0.6) * 100, 2);
+        if (listing.IsDistrictAutoDetected) rationale += " (район по GPS)";
+
+        // Считаем итоговый скор на основе взвешенного отклонения
+        var score = Math.Round((0.5 + weightedDeviation / 0.6) * 100, 2);
         return (Math.Clamp(score, 0, 100), rationale);
     }
 
@@ -1132,7 +1163,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Определение района (Hybrid: Local Polygon -> DB Nearest 1km -> OSM API)
     /// </summary>
-    private async Task<(string District, bool AutoDetected)> DetectDistrictAsync(double lat, double lon, ScoringContext ctx)
+    private async Task<(string District, bool AutoDetected)> DetectDistrictAsync(double lat, double lon, ScoringContext ctx, bool useExternalApi = true)
     {
         // 1. Локальный геокодер (мгновенно, без HTTP)
         var localDistrict = _minskGeo.GetDistrictByCoords(lat, lon);
@@ -1161,6 +1192,11 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         if (nearest != null)
         {
             return (nearest.District, true);
+        }
+
+        if (!useExternalApi)
+        {
+            return ("Unknown", false);
         }
 
         // 3. OSM Nominatim API Fallback (последний resort)
@@ -1210,7 +1246,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Определение района по адресу (Hybrid: Local Microdistrict Registry -> OSM Geocoding)
     /// </summary>
-    private async Task<(string District, bool IsAuto)> DetectDistrictByAddressAsync(string address)
+    private async Task<(string District, bool IsAuto)> DetectDistrictByAddressAsync(string address, bool useExternalApi = true)
     {
         // 1. Локальный поиск по микрорайонам (мгновенно, без HTTP)
         var localDistrict = _minskGeo.GetDistrictByAddress(address);
@@ -1218,6 +1254,11 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         {
             _logger.LogDebug("Район определён по микрорайону: {District}", localDistrict);
             return (localDistrict, true);
+        }
+
+        if (!useExternalApi)
+        {
+            return ("Unknown", false);
         }
 
         // 2. OSM Nominatim API Fallback

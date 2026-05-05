@@ -2,12 +2,54 @@
 @using RealEstateMinsk.Models
 @using RealEstateMinsk.Services
 
+@implements IDisposable
 @inject ListingService ListingService
 @inject KufarScraper Scraper
 @inject IConfiguration Configuration
 @inject OsmPolygonUpdaterService PolygonUpdater
+@inject UpdateProgressService ProgressService
 
 <PageTitle>Минск Недвижимость - Обзор</PageTitle>
+
+@if (ProgressService.IsActive)
+{
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm" style="border-radius: 12px; background: linear-gradient(to right, #ffffff, #f8f9fa);">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <div class="d-flex align-items-center">
+                            <div class="spinner-grow spinner-grow-sm text-primary me-2" role="status"></div>
+                            <span class="fw-bold text-dark">
+                                @ProgressService.Status
+                                @if (!string.IsNullOrEmpty(ProgressService.Region))
+                                {
+                                    <span class="badge bg-soft-primary text-primary ms-2" style="background-color: #e7f1ff;">
+                                        <i class="bi bi-geo-alt-fill"></i> @ProgressService.Region
+                                    </span>
+                                }
+                            </span>
+                        </div>
+                        <div class="text-end">
+                            @if (ProgressService.Page > 0)
+                            {
+                                <span class="badge bg-light text-dark me-2 border">
+                                    Стр. @ProgressService.Page из @ProgressService.MaxPages
+                                </span>
+                            }
+                            <span class="fw-bold text-primary">@((int)ProgressService.Progress)%</span>
+                        </div>
+                    </div>
+                    <div class="progress" style="height: 8px; background-color: #e9ecef; border-radius: 4px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" 
+                             role="progressbar" 
+                             style="width: @(ProgressService.Progress)%; transition: width 0.5s ease-in-out;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+}
 
 <div class="row mb-4">
     <div class="col-12 d-flex align-items-center flex-wrap gap-2">
@@ -31,9 +73,6 @@
                 <span class="spinner-border spinner-border-sm me-2"></span>
             }
             <i class="bi bi-download"></i> @(isLoading ? "Загрузка..." : "Обновить данные")
-        </button>
-        <button class="btn btn-warning" @onclick="SeedTestData" disabled="@isLoading">
-            <i class="bi bi-database-fill-gear"></i> Наполнить базу (80 тестовых)
         </button>
         <button class="btn btn-info text-white" @onclick="UpdateGeoPolygons" disabled="@isLoading">
             <i class="bi bi-map"></i> Обновить полигоны (OSM)
@@ -129,7 +168,15 @@
     protected override async Task OnInitializedAsync()
     {
         maxPages = Configuration.GetValue<int>("DataCollection:MaxPagesPerRun", 5);
+        ProgressService.OnProgressUpdated += HandleProgressUpdate;
         await LoadData();
+    }
+
+    private void HandleProgressUpdate() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        ProgressService.OnProgressUpdated -= HandleProgressUpdate;
     }
 
     private async Task LoadData()
@@ -147,19 +194,45 @@
         {
             int totalReceived = 0;
             int totalSaved = 0;
+            var categories = new[] { "Квартира", "Дом" };
+            var regions = new[] { ("7", "Минск"), ("5", "Минская область") };
+            
+            int totalSteps = categories.Length * regions.Length * maxPages;
+            int currentStep = 0;
 
-            foreach (var category in new[] { "Квартира", "Дом" })
+            ProgressService.Start("Запуск обновления данных...");
+
+            foreach (var category in categories)
             {
-                await foreach (var pageListings in Scraper.ScrapeEnumerableAsync(maxPages, category))
+                foreach (var (rgnId, rgnName) in regions)
                 {
-                    totalReceived += pageListings.Count;
-                    var (newCount, updatedCount, savedListings) = await ListingService.SaveListingsAsync(pageListings);
-                    totalSaved += newCount;
+                    int pageNum = 0;
+                    await foreach (var pageListings in Scraper.ScrapeEnumerableAsync(maxPages, category, rgnId))
+                    {
+                        pageNum++;
+                        currentStep++;
+                        
+                        var progress = (currentStep * 100.0) / totalSteps;
+                        ProgressService.Report(progress, $"Сбор: {category}", rgnName, pageNum, maxPages);
+
+                        totalReceived += pageListings.Count;
+                        var (newCount, updatedCount, savedListings) = await ListingService.SaveListingsAsync(pageListings);
+                        totalSaved += newCount;
+                        
+                        // Если получили меньше чем ожидали или это конец страниц в Scraper
+                        // (Scraper внутри уже обрабатывает регионы, но Index.razor об этом не знает детально)
+                    }
+                    // Scraper.ScrapeEnumerableAsync сам проходит по регионам rgnValues = { "7", "5" }
+                    // ВАЖНО: Текущий Scraper.ScrapeEnumerableAsync делает цикл по rgnValues ВНУТРИ.
+                    // Значит мой двойной цикл здесь может быть некорректным, если я вызываю его дважды.
                 }
             }
 
+            ProgressService.Report(100, "Обновление завершено");
             statusMessage = $"Получено {totalReceived}, сохранено {totalSaved}";
             await LoadData();
+            await Task.Delay(1500);
+            ProgressService.Reset();
         }
         catch (Exception ex)
         {
