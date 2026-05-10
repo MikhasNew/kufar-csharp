@@ -9,20 +9,21 @@ namespace RealEstateMinsk.Services;
 /// </summary>
 public class DataSeeder
 {
-    private readonly AppDbContext _db;
+    private readonly IDbContextFactory<AppDbContext> _contextFactory;
     private readonly ILogger<DataSeeder> _logger;
 
-    public DataSeeder(AppDbContext db, ILogger<DataSeeder> logger)
+    public DataSeeder(IDbContextFactory<AppDbContext> contextFactory, ILogger<DataSeeder> logger)
     {
-        _db = db;
+        _contextFactory = contextFactory;
         _logger = logger;
     }
 
     public async Task<int> SeedTestDataAsync()
     {
-        _db.Database.EnsureCreated();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        ctx.Database.EnsureCreated();
         
-        var existingCount = await _db.Listings.CountAsync();
+        var existingCount = await ctx.Listings.CountAsync();
         if (existingCount > 50)
         {
             _logger.LogInformation("База уже содержит {Count} объявлений, пропускаю", existingCount);
@@ -81,8 +82,8 @@ public class DataSeeder
             });
         }
 
-        await _db.Listings.AddRangeAsync(listings);
-        await _db.SaveChangesAsync();
+        await ctx.Listings.AddRangeAsync(listings);
+        await ctx.SaveChangesAsync();
 
         _logger.LogInformation("✅ Добавлено {Count} тестовых объявлений", listings.Count);
         return listings.Count;

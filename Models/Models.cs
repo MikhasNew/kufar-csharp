@@ -1,3 +1,4 @@
+using NetTopologySuite.Geometries;
 namespace RealEstateMinsk.Models;
 
 public class Listing
@@ -28,6 +29,7 @@ public class Listing
     public string? ImageUrl { get; set; }
     public double? Latitude { get; set; }
     public double? Longitude { get; set; }
+    public Point? GeoLocation { get; set; }
     public int? YearBuilt { get; set; }
     public int? Floor { get; set; }
     public int? TotalFloors { get; set; }
@@ -143,4 +145,20 @@ public class DistrictComparison
     public double AvgScore { get; set; }
     public double GrowthRate { get; set; }
     public double InvestmentIndex { get; set; }     // Композитный индекс привлекательности
+}
+
+public class PointOfInterest
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    /// <summary>
+    /// Тип: "metro", "park", "water", "forest"
+    /// </summary>
+    public string Type { get; set; } = "";
+    public Point? GeoLocation { get; set; }
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    /// <summary>Для метро: линия. Для парков/водоёмов: площадь в га.</summary>
+    public string? Extra { get; set; }
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

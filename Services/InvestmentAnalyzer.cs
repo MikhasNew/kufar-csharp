@@ -24,7 +24,7 @@ public interface IInvestmentAnalyzer
 
 public class InvestmentAnalyzer : IInvestmentAnalyzer
 {
-    private readonly AppDbContext _ctx;
+    private readonly IDbContextFactory<AppDbContext> _contextFactory;
     private readonly ILogger<InvestmentAnalyzer> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly MinskGeoService _minskGeo;
@@ -87,12 +87,17 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         // История цен: ListingId → список записей (для тренда)
         public Dictionary<int, List<PriceHistory>> HistoryByListing { get; init; } = new();
 
+        public List<PointOfInterest> MetroStations { get; init; } = new();
+        public List<PointOfInterest> Parks { get; init; } = new();
+        public List<PointOfInterest> WaterBodies { get; init; } = new();
+        public List<PointOfInterest> Forests { get; init; } = new();
+
         public DateTime HistoryCutoff { get; init; }
     }
 
-    public InvestmentAnalyzer(AppDbContext ctx, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory, MinskGeoService minskGeo, IConfiguration config)
+    public InvestmentAnalyzer(IDbContextFactory<AppDbContext> contextFactory, ILogger<InvestmentAnalyzer> logger, IHttpClientFactory httpClientFactory, MinskGeoService minskGeo, IConfiguration config)
     {
-        _ctx = ctx;
+        _contextFactory = contextFactory;
         _logger = logger;
         _httpClientFactory = httpClientFactory;
         _minskGeo = minskGeo;
@@ -102,12 +107,12 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Выполняет 3 SQL-запроса и строит ScoringContext для батчевой обработки.
     /// </summary>
-    private async Task<ScoringContext> BuildScoringContextAsync()
+    private async Task<ScoringContext> BuildScoringContextAsync(AppDbContext ctx)
     {
         var cutoff = DateTime.UtcNow.AddDays(-30);
 
         // 1 SQL: все объявления (id, lat, lon, area, pricePerSqm, district, flatType, category)
-        var allListings = await _ctx.Listings
+        var allListings = await ctx.Listings
             .Select(l => new Listing
             {
                 Id = l.Id,
@@ -124,7 +129,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             .ToListAsync();
 
         // 2 SQL: вся история цен (только нужные поля)
-        var allHistory = await _ctx.PriceHistories
+        var allHistory = await ctx.PriceHistories
             .Select(h => new PriceHistory
             {
                 ListingId = h.ListingId,
@@ -153,6 +158,10 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             .GroupBy(l => (l.Category, l.FlatType))
             .ToDictionary(g => g.Key, g => g.Average(l => l.PricePerSqm));
 
+        var allPoi = await ctx.PointsOfInterest
+            .Select(p => new PointOfInterest { Latitude = p.Latitude, Longitude = p.Longitude, Name = p.Name, Type = p.Type })
+            .ToListAsync();
+
         return new ScoringContext
         {
             AllListings = allListings,
@@ -160,6 +169,10 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             DistrictAvg = districtAvg,
             TypeAvg = typeAvg,
             HistoryByListing = historyByListing,
+            MetroStations = allPoi.Where(p => p.Type == "metro").ToList(),
+            Parks = allPoi.Where(p => p.Type == "park").ToList(),
+            WaterBodies = allPoi.Where(p => p.Type == "water").ToList(),
+            Forests = allPoi.Where(p => p.Type == "forest").ToList(),
             HistoryCutoff = cutoff
         };
     }
@@ -169,9 +182,10 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<InvestmentScore> CalculateScoreAsync(Listing listing)
     {
-        var ctx = await BuildScoringContextAsync();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var scoringCtx = await BuildScoringContextAsync(ctx);
         var allowExternal = _config.GetValue<bool>("InvestmentAnalysis:AllowExternalGeoApi", true);
-        return await CalculateScoreWithContextAsync(listing, ctx, useExternalApi: allowExternal);
+        return await CalculateScoreWithContextAsync(listing, scoringCtx, useExternalApi: allowExternal);
     }
 
     /// <summary>
@@ -221,6 +235,93 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         else
             (score.LocationScore, score.LocationRationale) = CalculateLocationScore(listing.District);
 
+        // === POI-бонусы ===
+        if (listing.Latitude.HasValue && listing.Longitude.HasValue)
+        {
+            var lat = listing.Latitude.Value;
+            var lon = listing.Longitude.Value;
+
+            // 1. Метро (только для квартир)
+            if (!isHouse && ctx.MetroStations.Count > 0)
+            {
+                var nearest = ctx.MetroStations
+                    .Select(m => new { m.Name, Dist = CalculateDistanceKm(lat, lon, m.Latitude, m.Longitude) })
+                    .OrderBy(m => m.Dist).First();
+
+                if (nearest.Dist <= 0.8)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 15);
+                    score.LiquidityScore = Math.Min(100, score.LiquidityScore + 10);
+                    score.LocationRationale += $" +15 метро '{nearest.Name}' ({Math.Round(nearest.Dist * 1000)}м).";
+                    score.LiquidityRationale += $" +10 (метро рядом).";
+                }
+                else if (nearest.Dist <= 1.5)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 8);
+                    score.LocationRationale += $" +8 метро '{nearest.Name}' ({Math.Round(nearest.Dist, 1)}км).";
+                }
+            }
+
+            // 2. Парки
+            if (ctx.Parks.Count > 0)
+            {
+                var nearest = ctx.Parks
+                    .Select(p => new { p.Name, Dist = CalculateDistanceKm(lat, lon, p.Latitude, p.Longitude) })
+                    .OrderBy(p => p.Dist).First();
+
+                if (nearest.Dist <= 0.5)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 8);
+                    score.LiquidityScore = Math.Min(100, score.LiquidityScore + 5);
+                    score.LocationRationale += $" +8 парк '{nearest.Name}' ({Math.Round(nearest.Dist * 1000)}м).";
+                }
+                else if (nearest.Dist <= 1.0)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 4);
+                    score.LocationRationale += $" +4 парк '{nearest.Name}' ({Math.Round(nearest.Dist, 1)}км).";
+                }
+            }
+
+            // 3. Водоёмы
+            if (ctx.WaterBodies.Count > 0)
+            {
+                var nearest = ctx.WaterBodies
+                    .Select(w => new { w.Name, Dist = CalculateDistanceKm(lat, lon, w.Latitude, w.Longitude) })
+                    .OrderBy(w => w.Dist).First();
+
+                if (nearest.Dist <= 0.3)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 10);
+                    score.LiquidityScore = Math.Min(100, score.LiquidityScore + 5);
+                    score.LocationRationale += $" +10 водоём '{nearest.Name}' ({Math.Round(nearest.Dist * 1000)}м).";
+                }
+                else if (nearest.Dist <= 0.8)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 5);
+                    score.LocationRationale += $" +5 водоём '{nearest.Name}' ({Math.Round(nearest.Dist * 1000)}м).";
+                }
+            }
+
+            // 4. Леса
+            if (ctx.Forests.Count > 0)
+            {
+                var nearest = ctx.Forests
+                    .Select(f => new { f.Name, Dist = CalculateDistanceKm(lat, lon, f.Latitude, f.Longitude) })
+                    .OrderBy(f => f.Dist).First();
+
+                if (nearest.Dist <= 0.5)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 6);
+                    score.LocationRationale += $" +6 лес '{nearest.Name}' ({Math.Round(nearest.Dist * 1000)}м).";
+                }
+                else if (nearest.Dist <= 1.2)
+                {
+                    score.LocationScore = Math.Min(100, score.LocationScore + 3);
+                    score.LocationRationale += $" +3 лес '{nearest.Name}' ({Math.Round(nearest.Dist, 1)}км).";
+                }
+            }
+        }
+
         // 3. Growth Potential (25%) — in-memory, 0 SQL
         (score.GrowthPotential, score.GrowthRationale) = CalculateGrowthPotentialFromContext(listing, ctx);
 
@@ -247,9 +348,10 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<InvestmentScore> GetOrCalculateScoreAsync(Listing listing, bool forceRecalculate = false)
     {
+        using var ctx = await _contextFactory.CreateDbContextAsync();
         if (!forceRecalculate)
         {
-            var cached = await _ctx.InvestmentScores.FirstOrDefaultAsync(s => s.ListingId == listing.Id);
+            var cached = await ctx.InvestmentScores.FirstOrDefaultAsync(s => s.ListingId == listing.Id);
             if (cached != null && (DateTime.UtcNow - cached.CalculatedAt).TotalHours < 24)
             {
                 return cached;
@@ -263,20 +365,21 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
 
     private async Task UpsertSingleScoreAsync(InvestmentScore score)
     {
-        var existing = await _ctx.InvestmentScores.FirstOrDefaultAsync(s => s.ListingId == score.ListingId);
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var existing = await ctx.InvestmentScores.FirstOrDefaultAsync(s => s.ListingId == score.ListingId);
         if (existing != null)
         {
             // Устанавливаем ID из существующей записи, чтобы SetValues не пытался его изменить
             score.Id = existing.Id;
-            _ctx.Entry(existing).CurrentValues.SetValues(score);
+            ctx.Entry(existing).CurrentValues.SetValues(score);
             existing.CalculatedAt = DateTime.UtcNow;
         }
         else
         {
-            await _ctx.InvestmentScores.AddAsync(score);
+            await ctx.InvestmentScores.AddAsync(score);
         }
 
-        await _ctx.SaveChangesAsync();
+        await ctx.SaveChangesAsync();
     }
 
     /// <summary>
@@ -284,7 +387,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<InvestmentScore?> GetScoreForListingAsync(int listingId)
     {
-        return await _ctx.InvestmentScores
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        return await ctx.InvestmentScores
             .FirstOrDefaultAsync(s => s.ListingId == listingId);
     }
 
@@ -293,7 +397,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<List<Listing>> GetTopInvestmentOpportunitiesAsync(int count = 20, string? category = null)
     {
-        var query = _ctx.InvestmentScores.Include(s => s.Listing).AsQueryable();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var query = ctx.InvestmentScores.Include(s => s.Listing).AsQueryable();
         if (!string.IsNullOrEmpty(category) && category != "Все")
         {
             query = query.Where(s => s.Listing!.Category == category);
@@ -330,7 +435,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<List<Listing>> FindUndervaluedAsync(int thresholdPercent = 15, string? category = null)
     {
-        var query = _ctx.Listings.AsQueryable();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var query = ctx.Listings.AsQueryable();
         if (!string.IsNullOrEmpty(category) && category != "Все")
         {
             query = query.Where(l => l.Category == category);
@@ -367,10 +473,11 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<MarketTrend> GetMarketTrendAsync(string? district = null, int daysBack = 30, string? category = null)
     {
+        using var ctx = await _contextFactory.CreateDbContextAsync();
         var startDate = DateTime.UtcNow.AddDays(-daysBack);
         var startDateStr = startDate.ToString("o");
 
-        var query = _ctx.Listings.AsQueryable();
+        var query = ctx.Listings.AsQueryable();
         if (!string.IsNullOrEmpty(district))
         {
             query = query.Where(l => l.District == district);
@@ -382,7 +489,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         var listingIds = await query.Select(l => l.Id).ToListAsync();
 
         // Все записи истории цен для нужных объявлений
-        var allHistory = await _ctx.PriceHistories
+        var allHistory = await ctx.PriceHistories
             .Where(h => listingIds.Contains(h.ListingId))
             .ToListAsync();
 
@@ -466,7 +573,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// </summary>
     public async Task<ComparativeAnalysis> CompareDistrictsAsync(string? category = null)
     {
-        var query = _ctx.Listings.AsQueryable();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var query = ctx.Listings.AsQueryable();
         if (!string.IsNullOrEmpty(category) && category != "Все")
         {
             query = query.Where(l => l.Category == category);
@@ -488,7 +596,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         foreach (var d in districts)
         {
             var trend = await GetMarketTrendAsync(d.District, 30, category);
-            var avgScore = await _ctx.InvestmentScores
+            var avgScore = await ctx.InvestmentScores
                 .Where(s => s.Listing!.District == d.District && s.Listing!.Category == category)
                 .AverageAsync(s => (double?)s.TotalScore) ?? 0;
 
@@ -533,8 +641,9 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     public async Task RecalculateAllScoresAsync()
     {
         _logger.LogInformation("Начало батчевого пересчёта скорингов...");
-        var scoringCtx = await BuildScoringContextAsync();
-        var listings = await _ctx.Listings.ToListAsync();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var scoringCtx = await BuildScoringContextAsync(ctx);
+        var listings = await ctx.Listings.ToListAsync();
         var scores = new List<InvestmentScore>(listings.Count);
         var modifiedListings = new List<Listing>();
         
@@ -558,16 +667,16 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             }
         }
 
-        _ctx.InvestmentScores.RemoveRange(await _ctx.InvestmentScores.ToListAsync());
-        await _ctx.InvestmentScores.AddRangeAsync(scores);
+        ctx.InvestmentScores.RemoveRange(await ctx.InvestmentScores.ToListAsync());
+        await ctx.InvestmentScores.AddRangeAsync(scores);
         
         if (modifiedListings.Any())
         {
-            _ctx.Listings.UpdateRange(modifiedListings);
+            ctx.Listings.UpdateRange(modifiedListings);
             _logger.LogInformation("Обновлено {Count} объявлений (авто-определение района)", modifiedListings.Count);
         }
 
-        await _ctx.SaveChangesAsync();
+        await ctx.SaveChangesAsync();
 
         _logger.LogInformation("Пересчитано {Count} скорингов (запросов к БД: 3 вместо {Old})", scores.Count, listings.Count * 8);
     }
@@ -581,8 +690,10 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         var listingList = listings.ToList();
         if (!listingList.Any()) return;
 
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+
         // Строим контекст один раз для всей пачки
-        var scoringCtx = await BuildScoringContextAsync();
+        var scoringCtx = await BuildScoringContextAsync(ctx);
 
         var listingIds = listingList.Select(l => l.Id).ToHashSet();
         var scores = new List<InvestmentScore>(listingList.Count);
@@ -621,18 +732,18 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
 
         if (scores.Count > 0)
         {
-            var existingScores = await _ctx.InvestmentScores
+            var existingScores = await ctx.InvestmentScores
                 .Where(s => listingIds.Contains(s.ListingId))
                 .ToListAsync();
-            _ctx.InvestmentScores.RemoveRange(existingScores);
-            await _ctx.InvestmentScores.AddRangeAsync(scores);
+            ctx.InvestmentScores.RemoveRange(existingScores);
+            await ctx.InvestmentScores.AddRangeAsync(scores);
 
             if (modifiedListings.Any())
             {
-                _ctx.Listings.UpdateRange(modifiedListings);
+                ctx.Listings.UpdateRange(modifiedListings);
             }
 
-            await _ctx.SaveChangesAsync();
+            await ctx.SaveChangesAsync();
         }
 
         _logger.LogInformation("Батч-скоринг: {Success} OK / {Errors} ошибок, сохранено {Saved}",
@@ -919,7 +1030,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         }
 
         // Бонус для недооцененных районов (ниже среднего)
-        var allListings = await _ctx.Listings.Where(l => l.Category == listing.Category).ToListAsync();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var allListings = await ctx.Listings.Where(l => l.Category == listing.Category).ToListAsync();
         if (allListings.Any())
         {
             var overallAvg = allListings.Average(l => l.PricePerSqm);

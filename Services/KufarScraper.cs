@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using NetTopologySuite.Geometries;
 using RealEstateMinsk.Models;
 
 namespace RealEstateMinsk.Services;
@@ -417,6 +418,7 @@ public class KufarScraper
                 TotalFloors = parsedFloors > 0 ? parsedFloors : null,
                 Latitude = lat,
                 Longitude = lon,
+                GeoLocation = (lat.HasValue && lon.HasValue) ? new Point(lon.Value, lat.Value) { SRID = 4326 } : null,
                 LotSize = lotSize,
                 WallMaterial = wallMaterial,
                 DistanceToMinsk = (lat.HasValue && lon.HasValue) ? Math.Round(_geo.GetDistanceToMinskCenter(lat.Value, lon.Value), 1) : null,

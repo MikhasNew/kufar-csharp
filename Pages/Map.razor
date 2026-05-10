@@ -1,0 +1,74 @@
+@page "/map"
+@inject IJSRuntime JS
+
+<PageTitle>Карта объектов</PageTitle>
+
+<div class="container-fluid px-0">
+    <div class="d-flex justify-content-between align-items-center p-3 bg-dark text-white">
+        <h4 class="mb-0"><i class="bi bi-map"></i> Карта недвижимости Минска</h4>
+        <div>
+            <button class="btn btn-sm btn-outline-light me-2" @onclick="LoadData" disabled="@_loading">
+                <i class="bi bi-arrow-clockwise"></i> Обновить
+            </button>
+            <span class="badge bg-success me-1">@_listingCount объектов</span>
+            <span class="badge bg-info">@_poiCount POI</span>
+        </div>
+    </div>
+    <div id="map-container" style="height: calc(100vh - 120px); width: 100%;"></div>
+</div>
+
+@code {
+    private bool _loading = true;
+    private int _listingCount;
+    private int _poiCount;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await JS.InvokeVoidAsync("MapInterop.init", "map-container");
+            await LoadData();
+        }
+    }
+
+    private async Task LoadData()
+    {
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            // Используем относительный путь или конфигурацию для базового адреса
+            using var http = new HttpClient { BaseAddress = new Uri("http://localhost:5000") };
+            var response = await http.GetAsync("/api/map/data");
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync();
+                var data = System.Text.Json.JsonDocument.Parse(json).RootElement;
+
+                if (data.TryGetProperty("listings", out var listings))
+                {
+                    _listingCount = listings.GetArrayLength();
+                    await JS.InvokeVoidAsync("MapInterop.addMarkers",
+                        System.Text.Json.JsonSerializer.Deserialize<object>(listings.GetRawText()));
+                }
+                if (data.TryGetProperty("polygons", out var polygons) && polygons.ValueKind != System.Text.Json.JsonValueKind.Null)
+                {
+                    await JS.InvokeVoidAsync("MapInterop.addPolygons",
+                        System.Text.Json.JsonSerializer.Deserialize<object>(polygons.GetRawText()));
+                }
+                if (data.TryGetProperty("poi", out var poi))
+                {
+                    _poiCount = poi.GetArrayLength();
+                    await JS.InvokeVoidAsync("MapInterop.addPoi",
+                        System.Text.Json.JsonSerializer.Deserialize<object>(poi.GetRawText()));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ошибка загрузки данных карты: {ex.Message}");
+        }
+        _loading = false;
+        StateHasChanged();
+    }
+}

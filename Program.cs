@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using NetTopologySuite.Geometries;
 using RealEstateMinsk.Data;
 using RealEstateMinsk.Services;
 
@@ -7,8 +9,17 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
+dataSourceBuilder.UseNetTopologySuite();
+var dataSource = dataSourceBuilder.Build();
+
+builder.Services.AddDbContextFactory<AppDbContext>(options =>
+    options.UseNpgsql(dataSource, o => o.UseNetTopologySuite()));
+
+// Также оставляем обычный AddDbContext для Minimal API и других сервисов, если нужно
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite("Data Source=realestate.db"));
+    options.UseNpgsql(dataSource, o => o.UseNetTopologySuite()));
 
 builder.Services.AddScoped<ListingService>();
 builder.Services.AddScoped<IInvestmentAnalyzer, InvestmentAnalyzer>();
@@ -20,8 +31,15 @@ builder.Services.AddHttpClient<OsmPolygonUpdaterService>(client =>
     client.DefaultRequestHeaders.Add("User-Agent", "RealEstateMinsk/1.0");
 });
 
-// Фоновый сервис для автоматического сбора данных
+builder.Services.AddHttpClient<PoiUpdaterService>(client =>
+{
+    client.DefaultRequestHeaders.Add("User-Agent", "RealEstateMinsk/1.0");
+    client.Timeout = TimeSpan.FromSeconds(60);
+});
+
+// Фоновые сервисы
 builder.Services.AddHostedService<DataCollectionService>();
+builder.Services.AddHostedService<GeoDataBackgroundService>();
 
 // KufarScraper с поддержкой логирования и локального геокодера (Singleton для reuse HttpClient)
 builder.Services.AddSingleton(sp => new KufarScraper(
@@ -40,25 +58,21 @@ var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
 {
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.EnsureCreated();
-    
-    // Безопасное добавление колонок для существующей БД
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE InvestmentScores ADD COLUMN PriceRationale TEXT DEFAULT ''"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE InvestmentScores ADD COLUMN LocationRationale TEXT DEFAULT ''"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE InvestmentScores ADD COLUMN GrowthRationale TEXT DEFAULT ''"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE InvestmentScores ADD COLUMN LiquidityRationale TEXT DEFAULT ''"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN IsDistrictAutoDetected INTEGER DEFAULT 0"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN Category TEXT DEFAULT 'Квартира'"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN LotSize REAL"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN WallMaterial TEXT"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN DistanceToMinsk REAL"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN PriceChangeUsd INTEGER DEFAULT 0"); } catch {}
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE Listings ADD COLUMN IsInteresting INTEGER DEFAULT 0"); } catch {}
-    
-    // Инициализация новых полей для старых данных
-    var listingService = scope.ServiceProvider.GetRequiredService<ListingService>();
-    _ = listingService.InitializePriceChangesAsync(); // Фоновое выполнение
+    try 
+    {
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        
+        // Убираем EnsureDeleted(), чтобы данные сохранялись
+        db.Database.EnsureCreated();
+        db.Database.ExecuteSqlRaw("CREATE EXTENSION IF NOT EXISTS postgis;");
+        
+        var listingService = scope.ServiceProvider.GetRequiredService<ListingService>();
+        _ = listingService.InitializePriceChangesAsync();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Ошибка при инициализации БД: {ex.Message}");
+    }
 }
 
 app.UseStaticFiles();
@@ -154,6 +168,92 @@ app.MapPost("/api/geo/update-polygons", async (OsmPolygonUpdaterService updater)
     var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "minsk_polygons.json");
     await updater.UpdatePolygonsAsync(path);
     return Results.Ok(new { message = "Обновление полигонов запущено/завершено. Проверьте логи." });
+});
+
+app.MapGet("/api/migrate-from-sqlite", async (AppDbContext pgDb) =>
+{
+    var sqliteConnStr = "Data Source=realestate.db";
+    var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
+    optionsBuilder.UseSqlite(sqliteConnStr);
+    using var sqliteDb = new AppDbContext(optionsBuilder.Options);
+
+    // Проверка: если в PostgreSQL уже есть данные — отказ
+    if (await pgDb.Listings.AnyAsync())
+        return Results.BadRequest(new { message = "PostgreSQL уже содержит данные. Миграция отменена." });
+
+    var listings = await sqliteDb.Listings.AsNoTracking().ToListAsync();
+    foreach (var l in listings)
+    {
+        l.Id = 0; // Сбрасываем Id для PostgreSQL auto-increment
+        if (l.Latitude.HasValue && l.Longitude.HasValue)
+        {
+            l.GeoLocation = new Point(l.Longitude.Value, l.Latitude.Value) { SRID = 4326 };
+        }
+    }
+    await pgDb.Listings.AddRangeAsync(listings);
+    await pgDb.SaveChangesAsync();
+
+    var scores = await sqliteDb.InvestmentScores.AsNoTracking().ToListAsync();
+    foreach (var s in scores) 
+    {
+        s.Id = 0;
+        s.CalculatedAt = DateTime.SpecifyKind(s.CalculatedAt, DateTimeKind.Utc);
+    }
+    await pgDb.InvestmentScores.AddRangeAsync(scores);
+    
+    var alerts = await sqliteDb.Alerts.AsNoTracking().ToListAsync();
+    foreach (var a in alerts) 
+    {
+        a.Id = 0;
+        a.CreatedAt = DateTime.SpecifyKind(a.CreatedAt, DateTimeKind.Utc);
+        if (a.LastTriggered.HasValue)
+            a.LastTriggered = DateTime.SpecifyKind(a.LastTriggered.Value, DateTimeKind.Utc);
+    }
+    
+    await pgDb.SaveChangesAsync();
+
+    return Results.Ok(new { 
+        message = "Миграция завершена",
+        listings = listings.Count,
+        scores = scores.Count,
+        alerts = alerts.Count
+    });
+});
+
+app.MapPost("/api/geo/update-poi", async (PoiUpdaterService updater) =>
+{
+    await updater.UpdateAllPoiAsync();
+    return Results.Ok(new { message = "Все POI обновлены (метро, парки, водоёмы, леса)" });
+});
+
+app.MapGet("/api/map/data", async (AppDbContext db) =>
+{
+    var listings = await db.InvestmentScores
+        .Include(s => s.Listing)
+        .Where(s => s.Listing!.Latitude != null && s.Listing.Longitude != null)
+        .Select(s => new {
+            lat = s.Listing!.Latitude, lon = s.Listing!.Longitude,
+            title = s.Listing.Title, price = s.Listing.PriceUsd,
+            pricePerSqm = Math.Round(s.Listing.PricePerSqm, 0),
+            area = s.Listing.Area, rooms = s.Listing.Rooms,
+            district = s.Listing.District,
+            score = Math.Round(s.TotalScore, 1),
+            recommendation = s.Recommendation, url = s.Listing.Url
+        }).ToListAsync();
+
+    var poi = await db.PointsOfInterest
+        .Select(p => new { lat = p.Latitude, lon = p.Longitude, name = p.Name, type = p.Type })
+        .ToListAsync();
+
+    object? polygons = null;
+    var polygonPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "minsk_polygons.json");
+    if (File.Exists(polygonPath))
+    {
+        var json = await File.ReadAllTextAsync(polygonPath);
+        polygons = System.Text.Json.JsonSerializer.Deserialize<object>(json);
+    }
+
+    return Results.Ok(new { listings, poi, polygons });
 });
 
 app.MapBlazorHub();

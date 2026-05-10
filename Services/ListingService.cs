@@ -6,15 +6,16 @@ namespace RealEstateMinsk.Services;
 
 public class ListingService
 {
-    private readonly AppDbContext _ctx;
+    private readonly IDbContextFactory<AppDbContext> _contextFactory;
 
-    public ListingService(AppDbContext ctx) => _ctx = ctx;
+    public ListingService(IDbContextFactory<AppDbContext> contextFactory) => _contextFactory = contextFactory;
 
     /// <summary>
     /// Сохраняет список объявлений в БД. Возвращает tuple: (новые, обновлённые, все затронутые listing-и).
     /// </summary>
     public async Task<(int NewCount, int UpdatedCount, List<Listing> SavedListings)> SaveListingsAsync(List<Listing> listings)
     {
+        using var ctx = await _contextFactory.CreateDbContextAsync();
         int saved = 0;
         int updated = 0;
         var now = DateTime.UtcNow.ToString("o");
@@ -22,11 +23,11 @@ public class ListingService
 
         foreach (var item in listings)
         {
-            var existing = await _ctx.Listings.FirstOrDefaultAsync(l => l.ExternalId == item.ExternalId);
+            var existing = await ctx.Listings.FirstOrDefaultAsync(l => l.ExternalId == item.ExternalId);
             if (existing == null)
             {
                 // Новое объявление
-                _ctx.Listings.Add(item);
+                ctx.Listings.Add(item);
                 savedListings.Add(item); // EF Core сгенерирует Id при SaveChanges
                 saved++;
             }
@@ -39,7 +40,7 @@ public class ListingService
                 if (existing.PriceUsd != item.PriceUsd)
                 {
                     // Мы должны найти ПЕРВУЮ зафиксированную цену, чтобы знать общий профит/убыток
-                    var firstPrice = await _ctx.PriceHistories
+                    var firstPrice = await ctx.PriceHistories
                         .Where(p => p.ListingId == existing.Id && p.PriceUsd > 0)
                         .OrderBy(p => p.RecordedAt)
                         .Select(p => p.PriceUsd)
@@ -54,7 +55,7 @@ public class ListingService
                     savedListings.Add(existing);
 
                     // Добавляем запись в историю цен
-                    _ctx.PriceHistories.Add(new PriceHistory
+                    ctx.PriceHistories.Add(new PriceHistory
                     {
                         ListingId = existing.Id,
                         PriceUsd = item.PriceUsd,
@@ -68,24 +69,24 @@ public class ListingService
 
         if (saved > 0 || updated > 0)
         {
-            await _ctx.SaveChangesAsync();
+            await ctx.SaveChangesAsync();
 
             // Если были добавлены новые объявления, нам нужно получить их сгенерированные ID
             // для добавления первой записи в историю цен.
             if (saved > 0)
             {
                 var newIds = listings.Select(l => l.ExternalId).ToList();
-                var newlySavedListings = await _ctx.Listings
+                var newlySavedListings = await ctx.Listings
                     .Where(l => newIds.Contains(l.ExternalId))
                     .ToListAsync();
 
                 foreach (var listing in newlySavedListings)
                 {
                     // Проверяем, нет ли уже истории цен для этого объявления (чтобы не дублировать)
-                    var hasHistory = await _ctx.PriceHistories.AnyAsync(p => p.ListingId == listing.Id);
+                    var hasHistory = await ctx.PriceHistories.AnyAsync(p => p.ListingId == listing.Id);
                     if (!hasHistory)
                     {
-                        _ctx.PriceHistories.Add(new PriceHistory
+                        ctx.PriceHistories.Add(new PriceHistory
                         {
                             ListingId = listing.Id,
                             PriceUsd = listing.PriceUsd,
@@ -95,7 +96,7 @@ public class ListingService
                         listing.PriceChangeUsd = 0; // Для нового объявления изменение 0
                     }
                 }
-                await _ctx.SaveChangesAsync();
+                await ctx.SaveChangesAsync();
             }
         }
 
@@ -107,7 +108,8 @@ public class ListingService
     /// </summary>
     public async Task InitializePriceChangesAsync()
     {
-        var listings = await _ctx.Listings.Include(l => l.PriceHistories).ToListAsync();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var listings = await ctx.Listings.Include(l => l.PriceHistories).ToListAsync();
         foreach (var l in listings)
         {
             if (l.PriceHistories.Any())
@@ -116,12 +118,13 @@ public class ListingService
                 l.PriceChangeUsd = l.PriceUsd - firstPrice;
             }
         }
-        await _ctx.SaveChangesAsync();
+        await ctx.SaveChangesAsync();
     }
 
     public async Task<PagedResult<Listing>> GetListingsAsync(ListingFilter? filter = null)
     {
-        var query = _ctx.Listings.Include(l => l.PriceHistories).AsQueryable();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var query = ctx.Listings.Include(l => l.PriceHistories).AsQueryable();
 
         if (filter != null)
         {
@@ -180,7 +183,8 @@ public class ListingService
 
     public async Task<MarketStats> GetStatsAsync(string? category = null)
     {
-        var query = _ctx.Listings.AsQueryable();
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var query = ctx.Listings.AsQueryable();
         if (!string.IsNullOrEmpty(category) && category != "Все")
         {
             query = query.Where(l => l.Category == category);
@@ -219,19 +223,26 @@ public class ListingService
 
     public async Task ToggleInterestingAsync(int id)
     {
-        var listing = await _ctx.Listings.FindAsync(id);
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        var listing = await ctx.Listings.FindAsync(id);
         if (listing != null)
         {
             listing.IsInteresting = !listing.IsInteresting;
-            await _ctx.SaveChangesAsync();
+            await ctx.SaveChangesAsync();
         }
     }
 
-    public async Task<List<string>> GetDistrictsAsync() =>
-        await _ctx.Listings.Select(l => l.District).Distinct().Where(d => d != "Unknown").OrderBy(d => d).ToListAsync();
+    public async Task<List<string>> GetDistrictsAsync()
+    {
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        return await ctx.Listings.Select(l => l.District).Distinct().Where(d => d != "Unknown").OrderBy(d => d).ToListAsync();
+    }
 
-    public async Task<List<string>> GetFlatTypesAsync() =>
-        await _ctx.Listings.Select(l => l.FlatType).Distinct().OrderBy(t => t).ToListAsync();
+    public async Task<List<string>> GetFlatTypesAsync()
+    {
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        return await ctx.Listings.Select(l => l.FlatType).Distinct().OrderBy(t => t).ToListAsync();
+    }
 }
 
 public class PagedResult<T>

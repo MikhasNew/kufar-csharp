@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: realestate_postgres
+    environment:
+      POSTGRES_DB: realestate
+      POSTGRES_USER: realestate
+      POSTGRES_PASSWORD: realestate123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
