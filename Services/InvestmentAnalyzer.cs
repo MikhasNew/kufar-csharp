@@ -475,7 +475,6 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     {
         using var ctx = await _contextFactory.CreateDbContextAsync();
         var startDate = DateTime.UtcNow.AddDays(-daysBack);
-        var startDateStr = startDate.ToString("o");
 
         var query = ctx.Listings.AsQueryable();
         if (!string.IsNullOrEmpty(district))
@@ -494,19 +493,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             .ToListAsync();
 
         // Разделяем на «старые» и «новые» записи
-        var recentHistory = allHistory.Where(h =>
-        {
-            if (DateTime.TryParse(h.RecordedAt, out var parsed))
-                return parsed >= startDate;
-            return false;
-        }).ToList();
-
-        var olderHistory = allHistory.Where(h =>
-        {
-            if (DateTime.TryParse(h.RecordedAt, out var parsed))
-                return parsed < startDate;
-            return false;
-        }).ToList();
+        var recentHistory = allHistory.Where(h => h.RecordedAt >= startDate).ToList();
+        var olderHistory = allHistory.Where(h => h.RecordedAt < startDate).ToList();
 
         // Если нет исторических данных, используем текущие цены из Listings
         var currentListings = await query.ToListAsync();
@@ -899,7 +887,7 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         var oldPrices = ctx.HistoryByListing
             .Where(kv => districtListingIds.Contains(kv.Key))
             .SelectMany(kv => kv.Value)
-            .Where(h => DateTime.TryParse(h.RecordedAt, out var d) && d < cutoff)
+            .Where(h => h.RecordedAt < cutoff)
             .Select(h => h.PricePerSqm)
             .ToList();
 

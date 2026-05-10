@@ -118,10 +118,10 @@
                             <div class="main-price">$@item.PriceUsd.ToString("N0")</div>
                             <div class="sqm-price">$@item.PricePerSqm.ToString("N0")/м²</div>
 
-                            @if (item.PriceHistories?.Count > 1)
+                            @if (item.PriceHistories?.Count > 0)
                             {
                                 var history = item.PriceHistories.Where(p => p.PriceUsd > 0).OrderBy(p => p.RecordedAt).ToList();
-                                if (history.Count > 1)
+                                if (history.Count > 0)
                                 {
                                     var firstPrice = history.First().PriceUsd;
                                     var diff = item.PriceUsd - firstPrice;

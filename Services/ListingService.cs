@@ -18,7 +18,7 @@ public class ListingService
         using var ctx = await _contextFactory.CreateDbContextAsync();
         int saved = 0;
         int updated = 0;
-        var now = DateTime.UtcNow.ToString("o");
+        var now = DateTime.UtcNow;
         var savedListings = new List<Listing>();
 
         foreach (var item in listings)

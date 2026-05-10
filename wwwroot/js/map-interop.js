@@ -1,50 +1,84 @@
 window.MapInterop = {
     map: null,
-    markersLayer: null,
+    clusterGroup: null,
     polygonsLayer: null,
     poiLayer: null,
 
     init: function (elementId) {
         if (this.map) { this.map.remove(); this.map = null; }
-        this.map = L.map(elementId).setView([53.9006, 27.5590], 12);
+
+        // Canvas renderer — рисует маркеры на canvas вместо DOM-элементов
+        this.map = L.map(elementId, {
+            preferCanvas: true
+        }).setView([53.9006, 27.5590], 12);
+
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19, attribution: '© OpenStreetMap'
         }).addTo(this.map);
 
-        this.markersLayer = L.layerGroup().addTo(this.map);
+        // MarkerCluster — группирует близкие маркеры, резко снижает число DOM-элементов
+        this.clusterGroup = L.markerClusterGroup({
+            maxClusterRadius: 50,
+            disableClusteringAtZoom: 17,
+            spiderfyOnMaxZoom: true,
+            chunkedLoading: true,       // Загрузка маркеров порциями — не блокирует UI
+            chunkInterval: 100,
+            chunkDelay: 10
+        });
+        this.map.addLayer(this.clusterGroup);
+
         this.polygonsLayer = L.layerGroup().addTo(this.map);
         this.poiLayer = L.layerGroup().addTo(this.map);
 
-        // Панель слоёв
         L.control.layers(null, {
-            "Объявления": this.markersLayer,
+            "Объявления": this.clusterGroup,
             "Районы": this.polygonsLayer,
             "POI": this.poiLayer
         }, { collapsed: false }).addTo(this.map);
     },
 
     addMarkers: function (listings) {
-        if (!this.markersLayer) return;
-        this.markersLayer.clearLayers();
-        var colors = { 'Buy': '#22c55e', 'Hold': '#f59e0b', 'Avoid': '#ef4444' };
+        if (!this.clusterGroup) return;
+        this.clusterGroup.clearLayers();
 
-        listings.forEach(function (l) {
-            if (!l.lat || !l.lon) return;
+        var colors = { 'Buy': '#22c55e', 'Hold': '#f59e0b', 'Avoid': '#ef4444' };
+        var markers = [];
+
+        for (var i = 0; i < listings.length; i++) {
+            var l = listings[i];
+            if (!l.lat || !l.lon) continue;
+
             var color = colors[l.recommendation] || '#6b7280';
-            var icon = L.divIcon({
-                className: 'custom-marker',
-                html: '<div style="background:' + color + ';width:12px;height:12px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3);"></div>',
-                iconSize: [12, 12], iconAnchor: [6, 6]
+
+            // circleMarker рисуется на Canvas — в сотни раз легче чем divIcon
+            var marker = L.circleMarker([l.lat, l.lon], {
+                radius: 6,
+                fillColor: color,
+                color: '#fff',
+                weight: 1.5,
+                fillOpacity: 0.85
             });
-            var popup = '<div style="min-width:200px">' +
-                '<b>' + (l.title || '').substring(0, 60) + '</b><br>' +
-                '<b>$' + (l.price || 0).toLocaleString() + '</b> · ' + (l.pricePerSqm || 0) + ' $/м²<br>' +
-                (l.rooms || '?') + ' комн. · ' + (l.area || '?') + ' м²<br>' +
-                'Район: ' + (l.district || '?') + '<br>' +
-                'Скор: <b>' + (l.score || 0) + '</b> — <span style="color:' + color + ';font-weight:bold">' + (l.recommendation || '?') + '</span><br>' +
-                (l.url ? '<a href="' + l.url + '" target="_blank">Kufar ↗</a>' : '') + '</div>';
-            L.marker([l.lat, l.lon], { icon: icon }).bindPopup(popup).addTo(this.markersLayer);
-        }.bind(this));
+
+            // Popup создаётся лениво — только при клике, а не для всех маркеров сразу
+            (function(listing, c) {
+                marker.on('click', function() {
+                    if (!this.getPopup()) {
+                        var popup = '<div style="min-width:200px">' +
+                            '<b>' + (listing.title || '').substring(0, 60) + '</b><br>' +
+                            '<b>$' + (listing.price || 0).toLocaleString() + '</b> · ' + (listing.pricePerSqm || 0) + ' $/м²<br>' +
+                            (listing.rooms || '?') + ' комн. · ' + (listing.area || '?') + ' м²<br>' +
+                            'Район: ' + (listing.district || '?') + '<br>' +
+                            'Скор: <b>' + (listing.score || 0) + '</b> — <span style="color:' + c + ';font-weight:bold">' + (listing.recommendation || '?') + '</span><br>' +
+                            (listing.url ? '<a href="' + listing.url + '" target="_blank">Kufar ↗</a>' : '') + '</div>';
+                        this.bindPopup(popup).openPopup();
+                    }
+                });
+            })(l, color);
+
+            markers.push(marker);
+        }
+
+        this.clusterGroup.addLayers(markers); // Batch-добавление — одна операция вместо тысяч
     },
 
     addPolygons: function (polygons) {
@@ -68,42 +102,34 @@ window.MapInterop = {
         if (!this.poiLayer) return;
         this.poiLayer.clearLayers();
 
-        var icons = {
-            metro: function() { return L.divIcon({
-                className:'', iconSize:[22,22], iconAnchor:[11,11],
-                html:'<div style="background:#e11d48;width:22px;height:22px;border-radius:50%;border:3px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:bold;box-shadow:0 2px 6px rgba(0,0,0,0.4)">M</div>'
-            }); },
-            park: function() { return L.divIcon({
-                className:'', iconSize:[20,20], iconAnchor:[10,10],
-                html:'<div style="background:#22c55e;width:20px;height:20px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:12px;box-shadow:0 1px 4px rgba(0,0,0,0.3)">🌳</div>'
-            }); },
-            water: function() { return L.divIcon({
-                className:'', iconSize:[20,20], iconAnchor:[10,10],
-                html:'<div style="background:#3b82f6;width:20px;height:20px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:12px;box-shadow:0 1px 4px rgba(0,0,0,0.3)">💧</div>'
-            }); },
-            forest: function() { return L.divIcon({
-                className:'', iconSize:[18,18], iconAnchor:[9,9],
-                html:'<div style="background:#15803d;width:18px;height:18px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:10px;box-shadow:0 1px 4px rgba(0,0,0,0.3)">🌲</div>'
-            }); }
-        };
+        var poiColors = { metro:'#e11d48', park:'#22c55e', water:'#3b82f6', forest:'#15803d' };
+        var poiRadius = { metro:7, park:5, water:5, forest:4 };
+        var poiLabels = { metro:'M', park:'P', water:'W', forest:'F' };
 
-        var radiuses = { metro: 800, park: 500, water: 300, forest: 500 };
-        var radiusColors = { metro:'#e11d48', park:'#22c55e', water:'#3b82f6', forest:'#15803d' };
+        for (var i = 0; i < poi.length; i++) {
+            var p = poi[i];
+            var color = poiColors[p.type] || '#6b7280';
+            var r = poiRadius[p.type] || 5;
 
-        poi.forEach(function(p) {
-            var iconFn = icons[p.type];
-            if (!iconFn) return;
-            L.marker([p.lat, p.lon], { icon: iconFn() })
-                .bindTooltip(p.name + ' (' + p.type + ')', { direction:'top', offset:[0,-12] })
-                .addTo(this.poiLayer);
+            // Canvas circleMarker — легковесный
+            var marker = L.circleMarker([p.lat, p.lon], {
+                radius: r,
+                fillColor: color,
+                color: '#fff',
+                weight: 2,
+                fillOpacity: 0.9
+            });
+            marker.bindTooltip(p.name, { direction:'top', offset:[0, -8] });
+            marker.addTo(this.poiLayer);
 
+            // Радиус пешей доступности только для метро
             if (p.type === 'metro') {
                 L.circle([p.lat, p.lon], {
-                    radius: radiuses[p.type], color: radiusColors[p.type],
-                    weight:1, fillColor: radiusColors[p.type], fillOpacity:0.04
+                    radius: 800, color: color,
+                    weight: 1, fillColor: color, fillOpacity: 0.04
                 }).addTo(this.poiLayer);
             }
-        }.bind(this));
+        }
     },
 
     invalidateSize: function () {

@@ -15,8 +15,8 @@ public class Listing
     public string FlatType { get; set; } = "";
     public string Location { get; set; } = "";
     public string Url { get; set; } = "";
-    public string CreatedAt { get; set; } = "";
-    public string ScrapedAt { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
+    public DateTime ScrapedAt { get; set; } = DateTime.UtcNow;
     public bool IsInteresting { get; set; }
     public string? Notes { get; set; }
     public bool IsDistrictAutoDetected { get; set; } // [NEW] Флаг OSM/БД детекции
@@ -43,7 +43,7 @@ public class PriceHistory
     public int ListingId { get; set; }
     public int PriceUsd { get; set; }
     public double PricePerSqm { get; set; }
-    public string RecordedAt { get; set; } = "";
+    public DateTime RecordedAt { get; set; } = DateTime.UtcNow;
 }
 
 public class MarketStats

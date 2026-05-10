@@ -427,8 +427,8 @@ public class KufarScraper
                 FlatType = GetFlatType(title, description),
                 Location = location,
                 Url = url,
-                CreatedAt = created,
-                ScrapedAt = DateTime.UtcNow.ToString("o"),
+                CreatedAt = DateTime.TryParse(created, out var dt) ? DateTime.SpecifyKind(dt, DateTimeKind.Utc) : DateTime.UtcNow,
+                ScrapedAt = DateTime.UtcNow,
                 Category = _currentCategory,
                 IsInteresting = false
             };

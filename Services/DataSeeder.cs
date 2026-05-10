@@ -76,8 +76,8 @@ public class DataSeeder
                 FlatType = flatTypes[i % flatTypes.Length],
                 Location = $"{streets[i % streets.Length]}, {district} район, Минск",
                 Url = $"https://kufar.by/l/{i + 1000}",
-                CreatedAt = DateTime.UtcNow.AddDays(-rand.Next(1, 30)).ToString("o"),
-                ScrapedAt = DateTime.UtcNow.ToString("o"),
+                CreatedAt = DateTime.UtcNow.AddDays(-rand.Next(1, 30)),
+                ScrapedAt = DateTime.UtcNow,
                 IsInteresting = i % 8 == 0
             });
         }

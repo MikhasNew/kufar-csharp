@@ -44,10 +44,6 @@ public class AppDbContext : DbContext
             .HasIndex(a => a.IsActive);
 
         modelBuilder.Entity<PointOfInterest>()
-            .Property(p => p.GeoLocation)
-            .HasColumnType("geometry(Point, 4326)");
-
-        modelBuilder.Entity<PointOfInterest>()
             .HasIndex(p => p.Type);
 
         if (Database.IsNpgsql())
@@ -56,11 +52,16 @@ public class AppDbContext : DbContext
                 .Property(l => l.GeoLocation)
                 .HasColumnType("geometry(Point, 4326)");
 
+            modelBuilder.Entity<PointOfInterest>()
+                .Property(p => p.GeoLocation)
+                .HasColumnType("geometry(Point, 4326)");
+
             modelBuilder.HasPostgresExtension("postgis");
         }
         else
         {
             modelBuilder.Entity<Listing>().Ignore(l => l.GeoLocation);
+            modelBuilder.Entity<PointOfInterest>().Ignore(l => l.GeoLocation);
         }
     }
 }

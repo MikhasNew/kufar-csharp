@@ -62,12 +62,51 @@ using (var scope = app.Services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         
-        // Убираем EnsureDeleted(), чтобы данные сохранялись
-        db.Database.EnsureCreated();
+        db.Database.OpenConnection();
         db.Database.ExecuteSqlRaw("CREATE EXTENSION IF NOT EXISTS postgis;");
+        db.Database.EnsureCreated();
+
+        // Явно создаем таблицу PointsOfInterest, так как EnsureCreated не добавляет новые таблицы в существующую схему
+        db.Database.ExecuteSqlRaw(@"
+            CREATE TABLE IF NOT EXISTS ""PointsOfInterest"" (
+                ""Id"" SERIAL PRIMARY KEY,
+                ""Name"" TEXT NOT NULL,
+                ""Type"" TEXT NOT NULL,
+                ""GeoLocation"" geometry(Point, 4326),
+                ""Latitude"" DOUBLE PRECISION NOT NULL,
+                ""Longitude"" DOUBLE PRECISION NOT NULL,
+                ""Extra"" TEXT,
+                ""UpdatedAt"" TIMESTAMP WITH TIME ZONE NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ""IX_PointsOfInterest_Type"" ON ""PointsOfInterest"" (""Type"");
+        ");
+
+        // Проверяем наличие колонки GeoLocation в Listings (могла отсутствовать, если база создана до Фазы 1)
+        try {
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"Listings\" ADD COLUMN IF NOT EXISTS \"GeoLocation\" geometry(Point, 4326);");
+            
+            // Конвертируем текстовые даты в timestamp, если они еще текстовые
+            db.Database.ExecuteSqlRaw(@"
+                DO $$ 
+                BEGIN 
+                    IF (SELECT data_type FROM information_schema.columns WHERE table_name = 'Listings' AND column_name = 'CreatedAt') = 'text' THEN
+                        ALTER TABLE ""Listings"" ALTER COLUMN ""CreatedAt"" TYPE timestamp with time zone USING ""CreatedAt""::timestamp with time zone;
+                    END IF;
+                    IF (SELECT data_type FROM information_schema.columns WHERE table_name = 'Listings' AND column_name = 'ScrapedAt') = 'text' THEN
+                        ALTER TABLE ""Listings"" ALTER COLUMN ""ScrapedAt"" TYPE timestamp with time zone USING ""ScrapedAt""::timestamp with time zone;
+                    END IF;
+                    IF (SELECT data_type FROM information_schema.columns WHERE table_name = 'PriceHistories' AND column_name = 'RecordedAt') = 'text' THEN
+                        ALTER TABLE ""PriceHistories"" ALTER COLUMN ""RecordedAt"" TYPE timestamp with time zone USING ""RecordedAt""::timestamp with time zone;
+                    END IF;
+                END $$;
+            ");
+        } catch (Exception ex) { 
+            Console.WriteLine($"Предупреждение при миграции колонок: {ex.Message}");
+        }
         
         var listingService = scope.ServiceProvider.GetRequiredService<ListingService>();
         _ = listingService.InitializePriceChangesAsync();
+        await RealEstateMinsk.Scratch.FilterCheck.Run(db);
     }
     catch (Exception ex)
     {
@@ -173,50 +212,82 @@ app.MapPost("/api/geo/update-polygons", async (OsmPolygonUpdaterService updater)
 app.MapGet("/api/migrate-from-sqlite", async (AppDbContext pgDb) =>
 {
     var sqliteConnStr = "Data Source=realestate.db";
+    if (!File.Exists("realestate.db"))
+        return Results.NotFound(new { message = "Файл realestate.db не найден" });
+
     var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
     optionsBuilder.UseSqlite(sqliteConnStr);
     using var sqliteDb = new AppDbContext(optionsBuilder.Options);
 
-    // Проверка: если в PostgreSQL уже есть данные — отказ
     if (await pgDb.Listings.AnyAsync())
         return Results.BadRequest(new { message = "PostgreSQL уже содержит данные. Миграция отменена." });
 
-    var listings = await sqliteDb.Listings.AsNoTracking().ToListAsync();
-    foreach (var l in listings)
+    // 1. Listings
+    var oldListings = await sqliteDb.Listings.AsNoTracking().ToListAsync();
+    var idMap = new Dictionary<int, int>();
+
+    foreach (var l in oldListings)
     {
-        l.Id = 0; // Сбрасываем Id для PostgreSQL auto-increment
+        var oldId = l.Id;
+        l.Id = 0; 
+        l.ScrapedAt = DateTime.SpecifyKind(l.ScrapedAt, DateTimeKind.Utc);
+        l.CreatedAt = DateTime.SpecifyKind(l.CreatedAt, DateTimeKind.Utc);
+        
         if (l.Latitude.HasValue && l.Longitude.HasValue)
         {
             l.GeoLocation = new Point(l.Longitude.Value, l.Latitude.Value) { SRID = 4326 };
         }
+        
+        await pgDb.Listings.AddAsync(l);
+        await pgDb.SaveChangesAsync(); // Сохраняем по одному, чтобы получить новый Id
+        idMap[oldId] = l.Id;
     }
-    await pgDb.Listings.AddRangeAsync(listings);
-    await pgDb.SaveChangesAsync();
 
-    var scores = await sqliteDb.InvestmentScores.AsNoTracking().ToListAsync();
-    foreach (var s in scores) 
+    // 2. PriceHistories
+    var histories = await sqliteDb.PriceHistories.AsNoTracking().ToListAsync();
+    foreach (var h in histories)
     {
-        s.Id = 0;
-        s.CalculatedAt = DateTime.SpecifyKind(s.CalculatedAt, DateTimeKind.Utc);
+        if (idMap.TryGetValue(h.ListingId, out var newId))
+        {
+            h.Id = 0;
+            h.ListingId = newId;
+            h.RecordedAt = DateTime.SpecifyKind(h.RecordedAt, DateTimeKind.Utc);
+            await pgDb.PriceHistories.AddAsync(h);
+        }
     }
-    await pgDb.InvestmentScores.AddRangeAsync(scores);
+
+    // 3. InvestmentScores
+    var scores = await sqliteDb.InvestmentScores.AsNoTracking().ToListAsync();
+    foreach (var s in scores)
+    {
+        if (idMap.TryGetValue(s.ListingId, out var newId))
+        {
+            s.Id = 0;
+            s.ListingId = newId;
+            s.CalculatedAt = DateTime.SpecifyKind(s.CalculatedAt, DateTimeKind.Utc);
+            await pgDb.InvestmentScores.AddAsync(s);
+        }
+    }
     
+    // 4. Alerts
     var alerts = await sqliteDb.Alerts.AsNoTracking().ToListAsync();
-    foreach (var a in alerts) 
+    foreach (var a in alerts)
     {
         a.Id = 0;
         a.CreatedAt = DateTime.SpecifyKind(a.CreatedAt, DateTimeKind.Utc);
         if (a.LastTriggered.HasValue)
             a.LastTriggered = DateTime.SpecifyKind(a.LastTriggered.Value, DateTimeKind.Utc);
+            
+        await pgDb.Alerts.AddAsync(a);
     }
     
     await pgDb.SaveChangesAsync();
 
     return Results.Ok(new { 
-        message = "Миграция завершена",
-        listings = listings.Count,
+        message = "Миграция завершена успешно",
+        listings = oldListings.Count,
         scores = scores.Count,
-        alerts = alerts.Count
+        histories = histories.Count
     });
 });
 
@@ -233,7 +304,8 @@ app.MapGet("/api/map/data", async (AppDbContext db) =>
         .Where(s => s.Listing!.Latitude != null && s.Listing.Longitude != null)
         .Select(s => new {
             lat = s.Listing!.Latitude, lon = s.Listing!.Longitude,
-            title = s.Listing.Title, price = s.Listing.PriceUsd,
+            title = s.Listing.Title.Substring(0, Math.Min(s.Listing.Title.Length, 60)),
+            price = s.Listing.PriceUsd,
             pricePerSqm = Math.Round(s.Listing.PricePerSqm, 0),
             area = s.Listing.Area, rooms = s.Listing.Rooms,
             district = s.Listing.District,
@@ -241,7 +313,9 @@ app.MapGet("/api/map/data", async (AppDbContext db) =>
             recommendation = s.Recommendation, url = s.Listing.Url
         }).ToListAsync();
 
+    // Фильтруем POI: метро — все, остальные — только именованные (убирает сотни безымянных мелких объектов)
     var poi = await db.PointsOfInterest
+        .Where(p => p.Type == "metro" || (p.Name != "" && p.Name != "Парк" && p.Name != "Водоём" && p.Name != "Лес"))
         .Select(p => new { lat = p.Latitude, lon = p.Longitude, name = p.Name, type = p.Type })
         .ToListAsync();
 
