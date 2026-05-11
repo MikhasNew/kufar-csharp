@@ -77,19 +77,32 @@
                             <thead>
                                 <tr>
                                     <th>#</th>
-                                    <th>Score</th>
+                                    <th style="cursor: pointer" @onclick='() => Sort("Score")' class="user-select-none">
+                                        Score @(sortColumn == "Score" ? (sortAscending ? "↑" : "↓") : "")
+                                    </th>
                                     <th>Рекомендация</th>
                                     <th>Название</th>
                                     <th>Район</th>
-                                    <th>Цена</th>
-                                    <th>$/м²</th>
-                                    <th>Комнат</th>
-                                    <th>Площадь</th>
+                                    <th style="cursor: pointer" @onclick='() => Sort("Distance")' class="user-select-none">
+                                        От центра @(sortColumn == "Distance" ? (sortAscending ? "↑" : "↓") : "")
+                                    </th>
+                                    <th style="cursor: pointer" @onclick='() => Sort("Price")' class="user-select-none">
+                                        Цена @(sortColumn == "Price" ? (sortAscending ? "↑" : "↓") : "")
+                                    </th>
+                                    <th style="cursor: pointer" @onclick='() => Sort("PricePerSqm")' class="user-select-none">
+                                        $/м² @(sortColumn == "PricePerSqm" ? (sortAscending ? "↑" : "↓") : "")
+                                    </th>
+                                    <th style="cursor: pointer" @onclick='() => Sort("Rooms")' class="user-select-none">
+                                        Комнат @(sortColumn == "Rooms" ? (sortAscending ? "↑" : "↓") : "")
+                                    </th>
+                                    <th style="cursor: pointer" @onclick='() => Sort("Area")' class="user-select-none">
+                                        Площадь @(sortColumn == "Area" ? (sortAscending ? "↑" : "↓") : "")
+                                    </th>
                                     <th>Детали</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                @foreach (var item in topListingsWithScores)
+                                @foreach (var item in PagedAndSortedListings)
                                 {
                                     <tr>
                                         <td>@item.Counter</td>
@@ -107,6 +120,16 @@
                                             <strong>@item.Listing.Title</strong>
                                         </td>
                                         <td><span class="badge badge-district">@item.Listing.District</span></td>
+                                        <td>
+                                            @if (item.Listing.DistanceToMinsk.HasValue && item.Listing.DistanceToMinsk > 0)
+                                            {
+                                                @item.Listing.DistanceToMinsk.Value.ToString("F1")<span> км</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted">—</span>
+                                            }
+                                        </td>
                                         <td class="price-tag">$@item.Listing.PriceUsd.ToString("N0")</td>
                                         <td>$@item.Listing.PricePerSqm.ToString("N0")</td>
                                         <td>@item.Listing.Rooms</td>
@@ -123,7 +146,7 @@
                                     @if (expandedListingIds.Contains(item.Listing.Id))
                                     {
                                         <tr class="table-active">
-                                            <td colspan="10" style="padding: 0;">
+                                            <td colspan="11" style="padding: 0;">
                                                 <div class="p-3" style="background: #f8f9fa; font-size: 0.85rem; border-left: 3px solid #0d6efd;">
                                                     <div class="d-flex justify-content-between align-items-center mb-2">
                                                         <div>
@@ -192,6 +215,41 @@
                             </tbody>
                         </table>
                     </div>
+                    
+                    @if (TotalPages > 1)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mt-3">
+                            <small class="text-muted">Показано @((currentPage - 1) * pageSize + 1)-@(Math.Min(currentPage * pageSize, topListingsWithScores.Count)) из @topListingsWithScores.Count</small>
+                            <nav>
+                                <ul class="pagination pagination-sm mb-0">
+                                    <li class="page-item @(currentPage == 1 ? "disabled" : "")">
+                                        <button class="page-link" @onclick="PrevPage">Назад</button>
+                                    </li>
+                                    @for (int i = 1; i <= TotalPages; i++)
+                                    {
+                                        var p = i;
+                                        if (i == 1 || i == TotalPages || Math.Abs(i - currentPage) <= 2)
+                                        {
+                                            <li class="page-item @(currentPage == p ? "active" : "")">
+                                                <button class="page-link" @onclick="() => GoToPage(p)">@p</button>
+                                            </li>
+                                        }
+                                        else if (i == 2 && currentPage > 4)
+                                        {
+                                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                                        }
+                                        else if (i == TotalPages - 1 && currentPage < TotalPages - 3)
+                                        {
+                                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                                        }
+                                    }
+                                    <li class="page-item @(currentPage == TotalPages ? "disabled" : "")">
+                                        <button class="page-link" @onclick="NextPage">Вперед</button>
+                                    </li>
+                                </ul>
+                            </nav>
+                        </div>
+                    }
                 }
                 else
                 {
@@ -291,6 +349,54 @@
     private int undervaluedCount = 0;
     private HashSet<int> expandedListingIds = new();
     private string selectedCategory = "";
+    
+    // Pagination & Sorting state
+    private int currentPage = 1;
+    private int pageSize = 15;
+    private string sortColumn = "Score";
+    private bool sortAscending = false;
+
+    private IEnumerable<(Listing Listing, InvestmentScore Score, int Counter)> PagedAndSortedListings
+    {
+        get
+        {
+            var query = topListingsWithScores.AsEnumerable();
+
+            query = sortColumn switch
+            {
+                "Score" => sortAscending ? query.OrderBy(x => x.Score.TotalScore) : query.OrderByDescending(x => x.Score.TotalScore),
+                "Price" => sortAscending ? query.OrderBy(x => x.Listing.PriceUsd) : query.OrderByDescending(x => x.Listing.PriceUsd),
+                "PricePerSqm" => sortAscending ? query.OrderBy(x => x.Listing.PricePerSqm) : query.OrderByDescending(x => x.Listing.PricePerSqm),
+                "Rooms" => sortAscending ? query.OrderBy(x => x.Listing.Rooms) : query.OrderByDescending(x => x.Listing.Rooms),
+                "Area" => sortAscending ? query.OrderBy(x => x.Listing.Area) : query.OrderByDescending(x => x.Listing.Area),
+                "Distance" => sortAscending ? query.OrderBy(x => x.Listing.DistanceToMinsk ?? 999) : query.OrderByDescending(x => x.Listing.DistanceToMinsk ?? 999),
+                _ => query
+            };
+
+            return query.Skip((currentPage - 1) * pageSize).Take(pageSize);
+        }
+    }
+
+    private int TotalPages => Math.Max(1, (int)Math.Ceiling(topListingsWithScores.Count / (double)pageSize));
+
+    private void Sort(string column)
+    {
+        if (sortColumn == column)
+        {
+            sortAscending = !sortAscending;
+        }
+        else
+        {
+            sortColumn = column;
+            sortAscending = true;
+            if (column == "Score") sortAscending = false;
+        }
+        currentPage = 1;
+    }
+
+    private void NextPage() { if (currentPage < TotalPages) currentPage++; }
+    private void PrevPage() { if (currentPage > 1) currentPage--; }
+    private void GoToPage(int page) { currentPage = page; }
 
     protected override async Task OnInitializedAsync()
     {
@@ -301,7 +407,7 @@
     {
         var category = selectedCategory == "Все" ? null : selectedCategory;
         comparativeAnalysis = await InvestmentAnalyzer.CompareDistrictsAsync(category);
-        topListings = await InvestmentAnalyzer.GetTopInvestmentOpportunitiesAsync(20, category);
+        topListings = await InvestmentAnalyzer.GetTopInvestmentOpportunitiesAsync(200, category);
         
         // Получаем скоринги для отображения (из БД, без пересчета)
         topListingsWithScores = new();

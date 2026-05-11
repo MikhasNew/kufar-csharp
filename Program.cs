@@ -106,6 +106,7 @@ using (var scope = app.Services.CreateScope())
         
         var listingService = scope.ServiceProvider.GetRequiredService<ListingService>();
         _ = listingService.InitializePriceChangesAsync();
+        await RealEstateMinsk.Scratch.StatsCheck.Run(scope.ServiceProvider);
         await RealEstateMinsk.Scratch.FilterCheck.Run(db);
     }
     catch (Exception ex)
@@ -303,7 +304,9 @@ app.MapGet("/api/map/data", async (AppDbContext db) =>
         .Include(s => s.Listing)
         .Where(s => s.Listing!.Latitude != null && s.Listing.Longitude != null)
         .Select(s => new {
-            lat = s.Listing!.Latitude, lon = s.Listing!.Longitude,
+            id = s.Listing!.Id,
+            isInteresting = s.Listing.IsInteresting,
+            lat = s.Listing.Latitude, lon = s.Listing.Longitude,
             title = s.Listing.Title.Substring(0, Math.Min(s.Listing.Title.Length, 60)),
             price = s.Listing.PriceUsd,
             pricePerSqm = Math.Round(s.Listing.PricePerSqm, 0),

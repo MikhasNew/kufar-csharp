@@ -3,6 +3,7 @@
 @using RealEstateMinsk.Services
 
 @inject ListingService ListingService
+@inject IJSRuntime JS
 
 <PageTitle>Статистика</PageTitle>
 
@@ -16,19 +17,19 @@
 </div>
 <div class="row">
     <div class="col-md-4">
-        <div class="chart-container">
+        <div class="chart-container" style="height: 400px;">
             <h5>По районам</h5>
             <canvas id="districtChart"></canvas>
         </div>
     </div>
     <div class="col-md-4">
-        <div class="chart-container">
+        <div class="chart-container" style="height: 400px;">
             <h5>По типу дома</h5>
             <canvas id="typeChart"></canvas>
         </div>
     </div>
     <div class="col-md-4">
-        <div class="chart-container">
+        <div class="chart-container" style="height: 400px;">
             <h5>По комнатам</h5>
             <canvas id="roomsChart"></canvas>
         </div>
@@ -38,14 +39,28 @@
 @code {
     private MarketStats stats = new();
     private string selectedCategory = "";
+    private bool isRendered = false;
 
     private async Task LoadData()
     {
         stats = await ListingService.GetStatsAsync(selectedCategory == "Все" ? null : selectedCategory);
+        if (isRendered)
+        {
+            await JS.InvokeVoidAsync("ChartInterop.renderStats", stats);
+        }
     }
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadData();
+        stats = await ListingService.GetStatsAsync(selectedCategory == "Все" ? null : selectedCategory);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            isRendered = true;
+            await JS.InvokeVoidAsync("ChartInterop.renderStats", stats);
+        }
     }
 }

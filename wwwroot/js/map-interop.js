@@ -3,8 +3,10 @@ window.MapInterop = {
     clusterGroup: null,
     polygonsLayer: null,
     poiLayer: null,
+    dotNetRef: null,
 
-    init: function (elementId) {
+    init: function (elementId, dotNetRef) {
+        this.dotNetRef = dotNetRef;
         if (this.map) { this.map.remove(); this.map = null; }
 
         // Canvas renderer — рисует маркеры на canvas вместо DOM-элементов
@@ -63,13 +65,21 @@ window.MapInterop = {
             (function(listing, c) {
                 marker.on('click', function() {
                     if (!this.getPopup()) {
-                        var popup = '<div style="min-width:200px">' +
+                        var isFav = listing.isInteresting;
+                        var btnColor = isFav ? 'orange' : 'gray';
+                        var btnWeight = isFav ? 'bold' : 'normal';
+                        var btnIcon = isFav ? '★ В избранном' : '☆ В избранное';
+                        var btnHtml = '<button onclick="window.MapInterop.toggleFav(' + listing.id + ', this)" ' +
+                            'style="border:none; background:none; cursor:pointer; color:' + btnColor + '; font-weight:' + btnWeight + '; padding:0; margin-top:8px;">' + btnIcon + '</button>';
+
+                        var popup = '<div style="min-width:200px; padding-bottom: 5px;">' +
                             '<b>' + (listing.title || '').substring(0, 60) + '</b><br>' +
                             '<b>$' + (listing.price || 0).toLocaleString() + '</b> · ' + (listing.pricePerSqm || 0) + ' $/м²<br>' +
                             (listing.rooms || '?') + ' комн. · ' + (listing.area || '?') + ' м²<br>' +
                             'Район: ' + (listing.district || '?') + '<br>' +
                             'Скор: <b>' + (listing.score || 0) + '</b> — <span style="color:' + c + ';font-weight:bold">' + (listing.recommendation || '?') + '</span><br>' +
-                            (listing.url ? '<a href="' + listing.url + '" target="_blank">Kufar ↗</a>' : '') + '</div>';
+                            (listing.url ? '<a href="' + listing.url + '" target="_blank">Kufar ↗</a>' : '') + '<br>' +
+                            btnHtml + '</div>';
                         this.bindPopup(popup).openPopup();
                     }
                 });
@@ -134,5 +144,26 @@ window.MapInterop = {
 
     invalidateSize: function () {
         if (this.map) setTimeout(function(){ this.map.invalidateSize(); }.bind(this), 100);
+    },
+
+    toggleFav: function (id, btnElement) {
+        var isCurrentlyFav = btnElement.innerText.indexOf('★') !== -1;
+        
+        // Optimistic UI update
+        if (isCurrentlyFav) {
+            btnElement.innerText = "☆ В избранное";
+            btnElement.style.color = "gray";
+            btnElement.style.fontWeight = "normal";
+        } else {
+            btnElement.innerText = "★ В избранном";
+            btnElement.style.color = "orange";
+            btnElement.style.fontWeight = "bold";
+        }
+
+        // Call Blazor C# method
+        if (this.dotNetRef) {
+            this.dotNetRef.invokeMethodAsync('ToggleInterestingFromMap', id)
+                .catch(err => console.error("Error toggling favorite:", err));
+        }
     }
 };

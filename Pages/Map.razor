@@ -1,5 +1,8 @@
 @page "/map"
+@using RealEstateMinsk.Services
+@implements IDisposable
 @inject IJSRuntime JS
+@inject ListingService ListingService
 
 <PageTitle>Карта объектов</PageTitle>
 
@@ -22,11 +25,18 @@
     private int _listingCount;
     private int _poiCount;
 
+    private DotNetObjectReference<Map>? _objRef;
+
+    protected override void OnInitialized()
+    {
+        _objRef = DotNetObjectReference.Create(this);
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
         {
-            await JS.InvokeVoidAsync("MapInterop.init", "map-container");
+            await JS.InvokeVoidAsync("MapInterop.init", "map-container", _objRef);
             await LoadData();
         }
     }
@@ -70,5 +80,16 @@
         }
         _loading = false;
         StateHasChanged();
+    }
+
+    [JSInvokable]
+    public async Task ToggleInterestingFromMap(int id)
+    {
+        await ListingService.ToggleInterestingAsync(id);
+    }
+
+    public void Dispose()
+    {
+        _objRef?.Dispose();
     }
 }
