@@ -488,4 +488,49 @@ public class KufarScraper
                 return "";
         }
     }
+
+    /// <summary>
+    /// Проверяет, активно ли объявление на Kufar, делая легкий HTTP-запрос.
+    /// </summary>
+    public async Task<bool> IsListingActiveAsync(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return false;
+        try
+        {
+            // Используем HttpClient для отправки запроса с автоматическим редиректом
+            var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+
+            // Если Kufar вернул 404 или 410, объявление снято.
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound || 
+                response.StatusCode == System.Net.HttpStatusCode.Gone)
+            {
+                _logger.LogDebug("Объявление {Url} вернуло {Status}", url, response.StatusCode);
+                return false;
+            }
+
+            // Проверяем факт редиректа на заглушку
+            var finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "";
+            if (string.IsNullOrEmpty(finalUrl)) return response.IsSuccessStatusCode;
+
+            // Если конечный URL указывает на главные страницы или заглушки "product-not-found", "/listings" и т.д.
+            if (finalUrl == "https://re.kufar.by/" || 
+                finalUrl == "https://www.kufar.by/" || 
+                finalUrl.Contains("product-not-found") || 
+                finalUrl.Contains("product_not_found") ||
+                finalUrl.Contains("/listings?") ||
+                finalUrl.EndsWith("/listings"))
+            {
+                _logger.LogInformation("Объявление {Url} перенаправлено на заглушку: {FinalUrl}", url, finalUrl);
+                return false;
+            }
+
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Ошибка при проверке активности объявления {Url}: {Msg}", url, ex.Message);
+            // В случае сетевых сбоев считаем временно активным, чтобы не пометить ошибочно закрытым
+            return true;
+        }
+    }
 }

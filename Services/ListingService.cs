@@ -35,6 +35,11 @@ public class ListingService
             {
                 // Существующее объявление - обновляем данные
                 existing.ScrapedAt = item.ScrapedAt;
+                if (existing.IsClosed)
+                {
+                    existing.IsClosed = false;
+                    existing.ClosedAt = null;
+                }
 
                 // Проверяем, изменилась ли цена
                 if (existing.PriceUsd != item.PriceUsd)
@@ -121,6 +126,46 @@ public class ListingService
         await ctx.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// Проверяет старые активные объявления и помечает закрытые как IsClosed = true.
+    /// </summary>
+    public async Task<int> ValidateActiveListingsAsync(KufarScraper scraper, int maxCheckedCount = 50)
+    {
+        using var ctx = await _contextFactory.CreateDbContextAsync();
+        
+        // Берем активные объявления, которые не обновлялись дольше 48 часов
+        var cutoff = DateTime.UtcNow.AddHours(-48);
+        var suspiciousListings = await ctx.Listings
+            .Where(l => !l.IsClosed && l.ScrapedAt < cutoff)
+            .OrderBy(l => l.ScrapedAt)
+            .Take(maxCheckedCount)
+            .ToListAsync();
+
+        int closedCount = 0;
+        foreach (var listing in suspiciousListings)
+        {
+            bool isActive = await scraper.IsListingActiveAsync(listing.Url);
+            if (!isActive)
+            {
+                listing.IsClosed = true;
+                listing.ClosedAt = DateTime.UtcNow;
+                closedCount++;
+            }
+            else
+            {
+                // Обновляем ScrapedAt, чтобы не проверять это объявление слишком часто
+                listing.ScrapedAt = DateTime.UtcNow;
+            }
+        }
+
+        if (suspiciousListings.Count > 0)
+        {
+            await ctx.SaveChangesAsync();
+        }
+
+        return closedCount;
+    }
+
     public async Task<PagedResult<Listing>> GetListingsAsync(ListingFilter? filter = null)
     {
         using var ctx = await _contextFactory.CreateDbContextAsync();
@@ -128,6 +173,10 @@ public class ListingService
 
         if (filter != null)
         {
+            if (filter.Status == "active")
+                query = query.Where(l => !l.IsClosed);
+            else if (filter.Status == "closed")
+                query = query.Where(l => l.IsClosed);
             if (!string.IsNullOrEmpty(filter.District))
                 query = query.Where(l => l.District == filter.District);
             if (filter.Rooms > 0)
@@ -160,7 +209,7 @@ public class ListingService
         }
         else
         {
-            query = query.OrderByDescending(l => l.ScrapedAt);
+            query = query.Where(l => !l.IsClosed).OrderByDescending(l => l.ScrapedAt);
         }
 
         var totalCount = await query.CountAsync();
@@ -184,7 +233,7 @@ public class ListingService
     public async Task<MarketStats> GetStatsAsync(string? category = null)
     {
         using var ctx = await _contextFactory.CreateDbContextAsync();
-        var query = ctx.Listings.AsQueryable();
+        var query = ctx.Listings.Where(l => !l.IsClosed).AsQueryable();
         if (!string.IsNullOrEmpty(category) && category != "Все")
         {
             query = query.Where(l => l.Category == category);
@@ -196,11 +245,34 @@ public class ListingService
             return new MarketStats();
         }
 
+        // Вычисляем показатели по закрытым объявлениям
+        var closedQuery = ctx.Listings.Where(l => l.IsClosed);
+        if (!string.IsNullOrEmpty(category) && category != "Все")
+        {
+            closedQuery = closedQuery.Where(l => l.Category == category);
+        }
+        var closedCount = await closedQuery.CountAsync();
+        double avgClosedDays = 0;
+        if (closedCount > 0)
+        {
+            var closedItems = await closedQuery
+                .Where(l => l.ClosedAt.HasValue && l.ClosedAt.Value > l.CreatedAt)
+                .Select(l => new { l.CreatedAt, l.ClosedAt })
+                .ToListAsync();
+
+            if (closedItems.Count > 0)
+            {
+                avgClosedDays = Math.Round(closedItems.Average(l => (l.ClosedAt!.Value - l.CreatedAt).TotalDays), 1);
+            }
+        }
+
         var stats = new MarketStats
         {
             TotalListings = count,
             AvgPriceSqm = Math.Round(await query.AverageAsync(l => l.PricePerSqm), 2),
-            AvgPrice = Math.Round(await query.AverageAsync(l => l.PriceUsd), 0)
+            AvgPrice = Math.Round(await query.AverageAsync(l => l.PriceUsd), 0),
+            ClosedListingsCount = closedCount,
+            AvgClosedDays = avgClosedDays
         };
 
         stats.ByDistrict = await query
@@ -266,6 +338,7 @@ public class ListingFilter
     public double? MaxDistanceToMinsk { get; set; }
     public bool PriceChangedOnly { get; set; }
     public string SortBy { get; set; } = "newest";
+    public string Status { get; set; } = "active"; // "active", "closed", "all"
     public int Page { get; set; } = 1;
     public int PageSize { get; set; } = 20;
 }

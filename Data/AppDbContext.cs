@@ -25,6 +25,12 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Listing>()
             .HasIndex(l => l.PricePerSqm);
 
+        modelBuilder.Entity<Listing>()
+            .HasIndex(l => l.IsClosed);
+
+        modelBuilder.Entity<Listing>()
+            .HasIndex(l => new { l.IsClosed, l.ClosedAt });
+
         modelBuilder.Entity<PriceHistory>()
             .HasIndex(p => p.ListingId);
 

@@ -84,6 +84,10 @@ using (var scope = app.Services.CreateScope())
         // Проверяем наличие колонки GeoLocation в Listings (могла отсутствовать, если база создана до Фазы 1)
         try {
             db.Database.ExecuteSqlRaw("ALTER TABLE \"Listings\" ADD COLUMN IF NOT EXISTS \"GeoLocation\" geometry(Point, 4326);");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"Listings\" ADD COLUMN IF NOT EXISTS \"IsClosed\" BOOLEAN DEFAULT FALSE;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"Listings\" ADD COLUMN IF NOT EXISTS \"ClosedAt\" TIMESTAMP WITH TIME ZONE;");
+            db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS \"IX_Listings_IsClosed\" ON \"Listings\" (\"IsClosed\");");
+            db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS \"IX_Listings_IsClosed_ClosedAt\" ON \"Listings\" (\"IsClosed\", \"ClosedAt\");");
             
             // Конвертируем текстовые даты в timestamp, если они еще текстовые
             db.Database.ExecuteSqlRaw(@"
@@ -107,6 +111,7 @@ using (var scope = app.Services.CreateScope())
         var listingService = scope.ServiceProvider.GetRequiredService<ListingService>();
         _ = listingService.InitializePriceChangesAsync();
         await RealEstateMinsk.Scratch.StatsCheck.Run(scope.ServiceProvider);
+        await RealEstateMinsk.Scratch.CheckListing.Run(scope.ServiceProvider);
         await RealEstateMinsk.Scratch.FilterCheck.Run(db);
     }
     catch (Exception ex)

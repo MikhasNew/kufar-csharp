@@ -107,6 +107,18 @@ public class DataCollectionService : BackgroundService
 
             TotalListingsCollected += totalSaved;
 
+            // После успешного сбора запускаем валидацию устаревших объявлений
+            try
+            {
+                _logger.LogInformation("Запуск проверки устаревших объявлений на предмет закрытия...");
+                var closedCount = await listingService.ValidateActiveListingsAsync(scraper, 100);
+                _logger.LogInformation("Проверка завершена. Обнаружено закрытых объявлений: {Count}", closedCount);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Ошибка при проверке устаревших объявлений: {Message}", ex.Message);
+            }
+
             // Автоматический пересчет инвестиционных скорингов если есть новые объявления
             if (hasNewListings)
             {

@@ -92,7 +92,7 @@
 <div class="row mb-4">
     <div class="col-md-3">
         <div class="stat-card">
-            <h6 class="text-muted">Всего объявлений</h6>
+            <h6 class="text-muted">Активных объявлений</h6>
             <h2>@stats.TotalListings</h2>
         </div>
     </div>
@@ -110,8 +110,23 @@
     </div>
     <div class="col-md-3">
         <div class="stat-card">
-            <h6 class="text-muted">Районов</h6>
+            <h6 class="text-muted">Активных районов</h6>
             <h2>@stats.ByDistrict.Count</h2>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="stat-card" style="border-left: 5px solid #ef4444; background: #fffcfc; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+            <h6 class="text-muted" style="font-weight: 600;"><i class="bi bi-x-circle-fill text-danger me-2"></i>Снято с продажи (архив)</h6>
+            <h2 style="color: #ef4444; font-weight: 800;">@stats.ClosedListingsCount <span style="font-size: 1rem; color: #94a3b8; font-weight: 500;">объектов</span></h2>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="stat-card" style="border-left: 5px solid #6366f1; background: #fafaff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+            <h6 class="text-muted" style="font-weight: 600;"><i class="bi bi-hourglass-split text-primary me-2"></i>Средний срок продажи (экспозиция)</h6>
+            <h2 style="color: #6366f1; font-weight: 800;">@(stats.AvgClosedDays > 0 ? $"{stats.AvgClosedDays:F1} дней" : "н/д")</h2>
         </div>
     </div>
 </div>

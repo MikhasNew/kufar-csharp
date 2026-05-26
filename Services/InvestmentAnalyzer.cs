@@ -92,6 +92,12 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         public List<PointOfInterest> WaterBodies { get; init; } = new();
         public List<PointOfInterest> Forests { get; init; } = new();
 
+        // Среднее время продажи по (категория, район)
+        public Dictionary<(string Cat, string Dist), double> AvgClosedDays { get; init; } = new();
+
+        // Средняя цена/м² закрытых по (категория, район)
+        public Dictionary<(string Cat, string Dist), double> DistrictClosedAvg { get; init; } = new();
+
         public DateTime HistoryCutoff { get; init; }
     }
 
@@ -111,8 +117,9 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     {
         var cutoff = DateTime.UtcNow.AddDays(-30);
 
-        // 1 SQL: все объявления (id, lat, lon, area, pricePerSqm, district, flatType, category)
+        // 1 SQL: все активные объявления (id, lat, lon, area, pricePerSqm, district, flatType, category)
         var allListings = await ctx.Listings
+            .Where(l => !l.IsClosed)
             .Select(l => new Listing
             {
                 Id = l.Id,
@@ -127,6 +134,23 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
                 DistanceToMinsk = l.DistanceToMinsk
             })
             .ToListAsync();
+
+        // 1.1 SQL: закрытые объявления за последние 90 дней для аналитики
+        var closedCutoff = DateTime.UtcNow.AddDays(-90);
+        var closedListings = await ctx.Listings
+            .Where(l => l.IsClosed && l.ClosedAt >= closedCutoff)
+            .Select(l => new { l.Category, l.District, l.PricePerSqm, l.CreatedAt, l.ClosedAt })
+            .ToListAsync();
+
+        var avgClosedDays = closedListings
+            .Where(l => l.ClosedAt.HasValue && l.ClosedAt.Value > l.CreatedAt)
+            .GroupBy(l => (l.Category, l.District))
+            .ToDictionary(g => g.Key, g => g.Average(l => (l.ClosedAt!.Value - l.CreatedAt).TotalDays));
+
+        var districtClosedAvg = closedListings
+            .Where(l => !string.IsNullOrEmpty(l.District) && l.District != "Unknown" && l.PricePerSqm > 0)
+            .GroupBy(l => (l.Category, l.District))
+            .ToDictionary(g => g.Key, g => g.Average(l => l.PricePerSqm));
 
         // 2 SQL: вся история цен (только нужные поля)
         var allHistory = await ctx.PriceHistories
@@ -173,6 +197,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
             Parks = allPoi.Where(p => p.Type == "park").ToList(),
             WaterBodies = allPoi.Where(p => p.Type == "water").ToList(),
             Forests = allPoi.Where(p => p.Type == "forest").ToList(),
+            AvgClosedDays = avgClosedDays,
+            DistrictClosedAvg = districtClosedAvg,
             HistoryCutoff = cutoff
         };
     }
@@ -325,8 +351,8 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         // 3. Growth Potential (25%) — in-memory, 0 SQL
         (score.GrowthPotential, score.GrowthRationale) = CalculateGrowthPotentialFromContext(listing, ctx);
 
-        // 4. Liquidity Score (15%) — pure calculation, 0 SQL
-        (score.LiquidityScore, score.LiquidityRationale) = CalculateLiquidityScore(listing);
+        // 4. Liquidity Score (15%) — dynamic calculation from closed listings context
+        (score.LiquidityScore, score.LiquidityRationale) = CalculateLiquidityScore(listing, ctx);
 
         // Общий скоринг
         score.TotalScore = Math.Round(
@@ -822,11 +848,18 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
         // Фоллбэк-бенчмарки из предзагруженных словарей (если аналоги не найдены даже в максимальном радиусе)
         if (benchmark == 0)
         {
+            ctx.DistrictClosedAvg.TryGetValue((listing.Category, listing.District ?? ""), out var districtClosedAvg);
             ctx.DistrictAvg.TryGetValue((listing.Category, listing.District ?? ""), out var districtAvg);
             ctx.TypeAvg.TryGetValue((listing.Category, listing.FlatType ?? ""), out var typeAvg);
             ctx.OverallAvgByCategory.TryGetValue(listing.Category, out var overallAvg);
 
-            if (districtAvg > 0)
+            if (districtClosedAvg > 0)
+            {
+                benchmark = districtClosedAvg;
+                usedConfidence = 0.50; // Доверие выше к реальным закрытым сделкам
+                rationale = $"Аналогов в {searchSteps.Last()} км не найдено. Ср. по архивным сделкам в '{listing.District}': {Math.Round(benchmark, 0)} $/м².";
+            }
+            else if (districtAvg > 0)
             {
                 benchmark = districtAvg;
                 usedConfidence = 0.40; // Очень слабое доверие к среднему по району
@@ -1036,10 +1069,27 @@ public class InvestmentAnalyzer : IInvestmentAnalyzer
     /// <summary>
     /// Расчет ликвидности (0-100)
     /// </summary>
-    private (double Score, string Rationale) CalculateLiquidityScore(Listing listing)
+    private (double Score, string Rationale) CalculateLiquidityScore(Listing listing, ScoringContext ctx)
     {
         double score = 50; // Базовый
         var rationale = new List<string> { "База (50)" };
+
+        // Учитываем реальный срок экспозиции закрытых объявлений в этом районе
+        if (ctx.AvgClosedDays.TryGetValue((listing.Category, listing.District ?? ""), out var avgDays))
+        {
+            if (avgDays < 15)
+            {
+                score += 15; rationale.Add($"+15 (высокая скорость продаж в районе: {avgDays:F1} дн.)");
+            }
+            else if (avgDays < 30)
+            {
+                score += 5; rationale.Add($"+5 (умеренная скорость продаж в районе: {avgDays:F1} дн.)");
+            }
+            else if (avgDays > 60)
+            {
+                score -= 10; rationale.Add($"-10 (низкая скорость продаж в районе: {avgDays:F1} дн.)");
+            }
+        }
         var isHouse = listing.Category == "Дом" || listing.Category == "Дача";
 
         if (isHouse)

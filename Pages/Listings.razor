@@ -59,6 +59,12 @@
                 </label>
             </div>
 
+            <select class="form-select custom-select" @bind="filter.Status" style="min-width: 170px;">
+                <option value="active">🟢 Активные</option>
+                <option value="closed">🚫 Снятые с продажи</option>
+                <option value="all">🔍 Все статусы</option>
+            </select>
+
             <select class="form-select custom-select" @bind="filter.SortBy" style="min-width: 200px;">
                 <option value="newest">🕒 Новые объявления</option>
                 <option value="price_change_asc">📉 Сначала скидки</option>
@@ -85,7 +91,7 @@
 <div class="listings-grid">
     @foreach (var item in result.Items)
     {
-        <div class="listing-card-modern">
+        <div class="listing-card-modern @(item.IsClosed ? "closed" : "")">
             <div class="card-body">
                 <div class="card-main">
                     <div class="card-info">
@@ -103,6 +109,15 @@
                                 @if (item.DistanceToMinsk.HasValue)
                                 {
                                     <span class="badge-custom distance">@item.DistanceToMinsk км</span>
+                                }
+                                @if (item.IsClosed)
+                                {
+                                    <span class="badge-custom closed-badge">🚫 Снято</span>
+                                    @if (item.ClosedAt.HasValue)
+                                    {
+                                        var days = Math.Max(1, (int)Math.Round((item.ClosedAt.Value - item.CreatedAt).TotalDays));
+                                        <span class="badge-custom exposure-badge">⏳ В продаже: @days дн.</span>
+                                    }
                                 }
                             </div>
                         </div>
@@ -143,9 +158,18 @@
                         </div>
                         
                         <div class="btn-group-vertical w-100 mt-3">
-                            <a href="@item.Url" target="_blank" class="btn btn-outline-primary btn-sm mb-2">
-                                <i class="bi bi-box-arrow-up-right"></i> На Куфаре
-                            </a>
+                            @if (item.IsClosed)
+                            {
+                                <button class="btn btn-outline-secondary btn-sm mb-2" disabled>
+                                    <i class="bi bi-x-circle"></i> Снято с продажи
+                                </button>
+                            }
+                            else
+                            {
+                                <a href="@item.Url" target="_blank" class="btn btn-outline-primary btn-sm mb-2">
+                                    <i class="bi bi-box-arrow-up-right"></i> На Куфаре
+                                </a>
+                            }
                             <button class="btn @(item.IsInteresting ? "btn-warning" : "btn-outline-secondary") btn-sm"
                                     @onclick="() => ToggleInteresting(item.Id)">
                                 <i class="bi @(item.IsInteresting ? "bi-star-fill" : "bi-star")"></i>
@@ -302,6 +326,15 @@
     transition: all 0.3s ease;
     overflow: hidden;
 }
+
+.listing-card-modern.closed {
+    opacity: 0.7;
+    background: #f8fafc;
+    filter: grayscale(15%);
+}
+
+.badge-custom.closed-badge { background: #fef2f2; color: #991b1b; }
+.badge-custom.exposure-badge { background: #f1f5f9; color: #334155; }
 
 .listing-card-modern:hover {
     transform: translateY(-4px);

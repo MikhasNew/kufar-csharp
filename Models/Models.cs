@@ -35,6 +35,8 @@ public class Listing
     public int? TotalFloors { get; set; }
     public List<PriceHistory> PriceHistories { get; set; } = new();
     public int PriceChangeUsd { get; set; } // Разница между текущей и первой ценой
+    public bool IsClosed { get; set; } = false;
+    public DateTime? ClosedAt { get; set; }
 }
 
 public class PriceHistory
@@ -51,6 +53,8 @@ public class MarketStats
     public int TotalListings { get; set; }
     public double AvgPriceSqm { get; set; }
     public double AvgPrice { get; set; }
+    public int ClosedListingsCount { get; set; }
+    public double AvgClosedDays { get; set; }
     public List<StatsItem> ByDistrict { get; set; } = new();
     public List<StatsItem> ByType { get; set; } = new();
     public List<StatsItem> ByRooms { get; set; } = new();
